@@ -83,11 +83,7 @@ class NeteaseMusicApi(
         val tracks = if (ids.isEmpty()) {
             playlistObject.array("tracks").map(::song)
         } else {
-            val byId = ids.chunked(500).flatMap { chunk ->
-            val payload = buildJsonArray { chunk.forEach { add(buildJsonObject { put("id", it) }) } }.toString()
-            request("/api/v3/song/detail", mapOf("c" to payload)).array("songs").map(::song)
-            }.associateBy(Song::id)
-            ids.mapNotNull(byId::get)
+            songDetails(ids)
         }
         return PlaylistDetail(metadata.copy(trackCount = maxOf(metadata.trackCount, tracks.size)), tracks)
     }
@@ -284,6 +280,72 @@ class NeteaseMusicApi(
             (item["simpleSong"] ?: value).let(::song)
         }
 
+    override suspend fun likedSongs(): List<Song> {
+        val uid = session.value.profile?.id ?: refreshAccount()?.id ?: error("请先登录网易云账号")
+        val ids = request("/api/song/like/get", mapOf("uid" to uid.toString()))
+            .array("ids").mapNotNull { it.jsonPrimitive.longOrNull }
+        return songDetails(ids)
+    }
+
+    override suspend fun likeSong(songId: Long, like: Boolean): Boolean {
+        request(
+            "/api/radio/like",
+            mapOf("alg" to "itembased", "trackId" to songId.toString(), "like" to like.toString(), "time" to "3"),
+        )
+        return true
+    }
+
+    override suspend fun subscribePlaylist(playlistId: Long, subscribe: Boolean): Boolean {
+        request("/api/playlist/${if (subscribe) "subscribe" else "unsubscribe"}", mapOf("id" to playlistId.toString()))
+        return true
+    }
+
+    override suspend fun subscribedAlbums(): List<Album> = request(
+        "/api/album/sublist",
+        mapOf("limit" to "1000", "offset" to "0", "total" to "true"),
+    ).array("data").map(::album)
+
+    override suspend fun subscribeAlbum(albumId: Long, subscribe: Boolean): Boolean {
+        request("/api/album/${if (subscribe) "sub" else "unsub"}", mapOf("id" to albumId.toString()))
+        return true
+    }
+
+    override suspend fun subscribedArtists(): List<Artist> = request(
+        "/api/artist/sublist",
+        mapOf("limit" to "1000", "offset" to "0", "total" to "true"),
+    ).array("data").map(::artist)
+
+    override suspend fun subscribeArtist(artistId: Long, subscribe: Boolean): Boolean {
+        request(
+            "/api/artist/${if (subscribe) "sub" else "unsub"}",
+            mapOf("artistId" to artistId.toString(), "artistIds" to "[$artistId]"),
+        )
+        return true
+    }
+
+    override suspend fun subscribedVideos(): List<Video> = request(
+        "/api/cloudvideo/allvideo/sublist",
+        mapOf("limit" to "1000", "offset" to "0", "total" to "true"),
+    ).array("data").map(::video)
+
+    override suspend fun subscribeVideo(videoId: String, subscribe: Boolean): Boolean {
+        request(
+            "/api/mv/${if (subscribe) "sub" else "unsub"}",
+            mapOf("mvId" to videoId, "mvIds" to "[\"$videoId\"]"),
+        )
+        return true
+    }
+
+    override suspend fun subscribedRadios(): List<Radio> = request(
+        "/api/djradio/get/subed",
+        mapOf("limit" to "1000", "offset" to "0", "total" to "true"),
+    ).array("djRadios").map(::radio)
+
+    override suspend fun subscribeRadio(radioId: Long, subscribe: Boolean): Boolean {
+        request("/api/djradio/${if (subscribe) "sub" else "unsub"}", mapOf("id" to radioId.toString()))
+        return true
+    }
+
     override suspend fun radios(): List<Radio> = request("/api/personalized/djprogram", emptyMap()).array("result").map { value ->
         val item = value.jsonObject
         Radio(item.long("id"), item.string("name"), item.optionalString("copywriter").orEmpty(), item.optionalString("picUrl"))
@@ -352,6 +414,15 @@ class NeteaseMusicApi(
             aliases = item.array("alia").mapNotNull { it.jsonPrimitive.contentOrNull },
             fee = item.int("fee"),
         )
+    }
+
+    private suspend fun songDetails(ids: List<Long>): List<Song> {
+        if (ids.isEmpty()) return emptyList()
+        val byId = ids.chunked(500).flatMap { chunk ->
+            val payload = buildJsonArray { chunk.forEach { add(buildJsonObject { put("id", it) }) } }.toString()
+            request("/api/v3/song/detail", mapOf("c" to payload)).array("songs").map(::song)
+        }.associateBy(Song::id)
+        return ids.mapNotNull(byId::get)
     }
 
     private fun playlist(value: JsonElement): Playlist = playlist(value.jsonObject)

@@ -28,6 +28,17 @@ interface MusicApi {
     suspend fun logout()
     suspend fun dailySongs(): List<Song> = search("")
     suspend fun cloudSongs(): List<Song> = emptyList()
+    suspend fun likedSongs(): List<Song> = emptyList()
+    suspend fun likeSong(songId: Long, like: Boolean): Boolean = false
+    suspend fun subscribePlaylist(playlistId: Long, subscribe: Boolean): Boolean = false
+    suspend fun subscribedAlbums(): List<Album> = emptyList()
+    suspend fun subscribeAlbum(albumId: Long, subscribe: Boolean): Boolean = false
+    suspend fun subscribedArtists(): List<Artist> = emptyList()
+    suspend fun subscribeArtist(artistId: Long, subscribe: Boolean): Boolean = false
+    suspend fun subscribedVideos(): List<Video> = emptyList()
+    suspend fun subscribeVideo(videoId: String, subscribe: Boolean): Boolean = false
+    suspend fun subscribedRadios(): List<Radio> = emptyList()
+    suspend fun subscribeRadio(radioId: Long, subscribe: Boolean): Boolean = false
     suspend fun history(): List<Song> = emptyList()
     suspend fun videos(songId: Long): List<Video> = emptyList()
     suspend fun radios(): List<Radio> = emptyList()

@@ -214,4 +214,83 @@ class NeteaseMusicApiTest {
             paths,
         )
     }
+
+    @Test
+    fun likedSongsResolveIdsInAccountOrder() = runTest {
+        val responses = ArrayDeque(
+            listOf(
+                """{"code":200,"profile":{"userId":9,"nickname":"User"}}""",
+                """{"code":200,"ids":[2,1]}""",
+                """{"code":200,"songs":[{"id":1,"name":"First","ar":[{"name":"Artist"}],"al":{"name":"Album"}},{"id":2,"name":"Second","ar":[{"name":"Artist"}],"al":{"name":"Album"}}]}""",
+            ),
+        )
+        val paths = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            paths += request.url.encodedPath
+            respond(
+                content = responses.removeFirst(),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+
+        val songs = NeteaseMusicApi(HttpClient(engine), storedCookie = "").likedSongs()
+
+        assertEquals(listOf(2L, 1L), songs.map { it.id })
+        assertEquals(listOf("/api/nuser/account/get", "/api/song/like/get", "/api/v3/song/detail"), paths)
+    }
+
+    @Test
+    fun favoriteCollectionsParseAndMutateThroughNativeEndpoints() = runTest {
+        val responses = ArrayDeque(
+            listOf(
+                """{"code":200,"data":[{"id":1,"name":"Album","artist":{"name":"Artist"},"size":2}]}""",
+                """{"code":200,"data":[{"id":3,"name":"Artist","albumSize":4,"musicSize":5}]}""",
+                """{"code":200,"data":[{"vid":"6","title":"Video","creator":[{"userName":"Creator"}]}]}""",
+                """{"code":200,"djRadios":[{"id":7,"name":"Radio","desc":"Description"}]}""",
+                """{"code":200}""",
+                """{"code":200}""",
+                """{"code":200}""",
+                """{"code":200}""",
+                """{"code":200}""",
+                """{"code":200}""",
+            ),
+        )
+        val paths = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            paths += request.url.encodedPath
+            respond(
+                content = responses.removeFirst(),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val api = NeteaseMusicApi(HttpClient(engine), storedCookie = "")
+
+        assertEquals("Album", api.subscribedAlbums().single().name)
+        assertEquals("Artist", api.subscribedArtists().single().name)
+        assertEquals("Video", api.subscribedVideos().single().title)
+        assertEquals("Radio", api.subscribedRadios().single().name)
+        assertTrue(api.likeSong(8, true))
+        assertTrue(api.subscribePlaylist(9, true))
+        assertTrue(api.subscribeAlbum(1, true))
+        assertTrue(api.subscribeArtist(3, true))
+        assertTrue(api.subscribeVideo("6", true))
+        assertTrue(api.subscribeRadio(7, true))
+        assertEquals(
+            listOf(
+                "/api/album/sublist",
+                "/api/artist/sublist",
+                "/api/cloudvideo/allvideo/sublist",
+                "/api/djradio/get/subed",
+                "/api/radio/like",
+                "/api/playlist/subscribe",
+                "/api/album/sub",
+                "/api/artist/sub",
+                "/api/mv/sub",
+                "/api/djradio/sub",
+            ),
+            paths,
+        )
+    }
 }
