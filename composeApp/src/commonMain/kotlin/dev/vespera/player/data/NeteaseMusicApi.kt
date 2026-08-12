@@ -1,76 +1,252 @@
 package dev.vespera.player.data
 
 import dev.vespera.player.model.*
-import io.ktor.client.*
-import io.ktor.client.call.*
-import io.ktor.client.plugins.contentnegotiation.*
-import io.ktor.client.request.*
-import io.ktor.http.*
-import io.ktor.serialization.kotlinx.json.*
+import io.ktor.client.HttpClient
+import io.ktor.client.request.forms.submitForm
+import io.ktor.client.request.header
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.HttpHeaders
+import io.ktor.http.Parameters
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
 
 class NeteaseMusicApi(
-    private val baseUrl: String,
-    private val userId: Long? = null,
-    private val cookie: String? = null,
-    private val client: HttpClient = HttpClient { install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) } },
+    private val client: HttpClient,
+    storedCookie: String? = SessionStore.loadCookie(),
 ) : MusicApi {
-    override suspend fun search(keyword: String, page: Int): List<Song> = request("cloudsearch", mapOf("keywords" to keyword, "limit" to "30", "offset" to ((page - 1) * 30).toString())).obj("result").array("songs").map(::song)
+    private val domain = "https://interface.music.163.com"
+    private val cookies = linkedMapOf<String, String>()
+    private val cookieMutex = Mutex()
+    private val _session = MutableStateFlow(AccountSession())
+    override val session = _session.asStateFlow()
 
-    override suspend fun playlists(): List<Playlist> {
-        val uid = requireNotNull(userId) { "请先在设置中填写网易云用户 ID" }
-        return request("user/playlist", mapOf("uid" to uid.toString())).array("playlist").map { value ->
-            val item = value.jsonObject
-            Playlist(item.long("id"), item.string("name"), item.int("trackCount"), item.optionalString("coverImgUrl"))
+    init {
+        storedCookie.orEmpty().split(';').forEach { part ->
+            val separator = part.indexOf('=')
+            if (separator > 0) cookies[part.substring(0, separator).trim()] = part.substring(separator + 1).trim()
         }
     }
 
-    override suspend fun playlistTracks(id: Long): List<Song> = request("playlist/track/all", mapOf("id" to id.toString(), "limit" to "1000")).array("songs").map(::song)
+    override suspend fun search(keyword: String, page: Int): List<Song> = request(
+        "/api/cloudsearch/pc",
+        mapOf("s" to keyword, "type" to "1", "limit" to "30", "offset" to ((page - 1) * 30).toString(), "total" to "true"),
+    ).obj("result").array("songs").map(::song)
 
-    override suspend fun lyric(songId: Long): String {
-        val root = request("lyric/new", mapOf("id" to songId.toString()))
-        return root.objOrNull("lrc")?.optionalString("lyric") ?: root.objOrNull("yrc")?.optionalString("lyric").orEmpty()
+    override suspend fun playlists(): List<Playlist> {
+        val uid = session.value.profile?.id ?: refreshAccount()?.id ?: error("请先登录网易云账号")
+        return request("/api/user/playlist", mapOf("uid" to uid.toString(), "limit" to "1000", "offset" to "0", "includeVideo" to "true"))
+            .array("playlist").map { value ->
+                val item = value.jsonObject
+                Playlist(
+                    id = item.long("id"),
+                    name = item.string("name"),
+                    trackCount = item.int("trackCount"),
+                    coverUrl = item.optionalString("coverImgUrl"),
+                    description = item.optionalString("description").orEmpty(),
+                    creator = item.objOrNull("creator")?.optionalString("nickname").orEmpty(),
+                    subscribed = item.boolean("subscribed"),
+                )
+            }
     }
 
-    override suspend fun comments(songId: Long, page: Int): List<Comment> = request("comment/music", mapOf("id" to songId.toString(), "limit" to "20", "offset" to ((page - 1) * 20).toString())).array("comments").map { value ->
-        val item = value.jsonObject; val user = item.obj("user")
-        Comment(item.long("commentId"), user.string("nickname"), user.optionalString("avatarUrl"), item.string("content"), item.int("likedCount"), item.optionalString("timeStr").orEmpty())
+    override suspend fun playlistTracks(id: Long): List<Song> {
+        val playlist = request("/api/v6/playlist/detail", mapOf("id" to id.toString(), "n" to "100000", "s" to "8")).obj("playlist")
+        val ids = playlist.array("trackIds").mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.longOrNull }
+        if (ids.isEmpty()) return playlist.array("tracks").map(::song)
+        return ids.chunked(500).flatMap { chunk ->
+            val payload = buildJsonArray { chunk.forEach { add(buildJsonObject { put("id", it) }) } }.toString()
+            request("/api/v3/song/detail", mapOf("c" to payload)).array("songs").map(::song)
+        }
     }
 
-    override suspend fun streamUrl(songId: Long, quality: String): String? = request("song/url/v1", mapOf("id" to songId.toString(), "level" to quality)).array("data").firstOrNull()?.jsonObject?.optionalString("url")
+    override suspend fun lyrics(songId: Long): LyricBundle {
+        val root = request(
+            "/api/song/lyric/v1",
+            mapOf("id" to songId.toString(), "cp" to "false", "tv" to "0", "lv" to "0", "rv" to "0", "kv" to "0", "yv" to "0", "ytv" to "0", "yrv" to "0"),
+        )
+        return LyricBundle(
+            line = root.objOrNull("lrc")?.optionalString("lyric").orEmpty(),
+            word = root.objOrNull("yrc")?.optionalString("lyric").orEmpty(),
+            translated = root.objOrNull("tlyric")?.optionalString("lyric").orEmpty(),
+            romanized = root.objOrNull("romalrc")?.optionalString("lyric").orEmpty(),
+        )
+    }
+
+    override suspend fun comments(songId: Long, page: Int): List<Comment> = request(
+        "/api/v1/resource/comments/R_SO_4_$songId",
+        mapOf("rid" to songId.toString(), "limit" to "20", "offset" to ((page - 1) * 20).toString(), "beforeTime" to "0"),
+    ).array("comments").map { value ->
+        val item = value.jsonObject
+        val user = item.obj("user")
+        Comment(
+            id = item.long("commentId"),
+            user = user.string("nickname"),
+            avatarUrl = user.optionalString("avatarUrl"),
+            content = item.string("content"),
+            likedCount = item.int("likedCount"),
+            timeLabel = item.optionalString("timeStr").orEmpty(),
+            liked = item.boolean("liked"),
+            replyContent = item.array("beReplied").firstOrNull()?.jsonObject?.optionalString("content"),
+        )
+    }
+
+    override suspend fun streamUrl(songId: Long, quality: String): String? = request(
+        "/api/song/enhance/player/url/v1",
+        mapOf("ids" to "[$songId]", "level" to quality, "encodeType" to "flac"),
+    ).array("data").firstOrNull()?.jsonObject?.optionalString("url")
 
     override suspend fun createLoginQr(): LoginQr {
-        val key = request("login/qr/key", emptyMap()).obj("data").string("unikey")
-        val data = request("login/qr/create", mapOf("key" to key, "qrimg" to "true")).obj("data")
-        return LoginQr(key, data.optionalString("qrimg").orEmpty())
+        val key = request("/api/login/qrcode/unikey", mapOf("type" to "3")).string("unikey")
+        return LoginQr(key, "https://music.163.com/login?codekey=$key")
     }
 
     override suspend fun checkLoginQr(key: String): LoginResult {
-        val root = request("login/qr/check", mapOf("key" to key), validateCode = false)
+        val root = request("/api/login/qrcode/client/login", mapOf("key" to key, "type" to "3"), validateCode = false)
         val code = root["code"]?.jsonPrimitive?.intOrNull
-        val status = when (code) { 800 -> LoginStatus.EXPIRED; 801 -> LoginStatus.WAITING; 802 -> LoginStatus.SCANNED; 803 -> LoginStatus.AUTHORIZED; else -> LoginStatus.ERROR }
-        return LoginResult(status, root.optionalString("message").orEmpty(), root.optionalString("cookie"))
+        val status = when (code) {
+            800 -> LoginStatus.EXPIRED
+            801 -> LoginStatus.WAITING
+            802 -> LoginStatus.SCANNED
+            803 -> LoginStatus.AUTHORIZED
+            else -> LoginStatus.ERROR
+        }
+        if (status == LoginStatus.AUTHORIZED) refreshAccount()
+        return LoginResult(status, root.optionalString("message").orEmpty(), cookieHeader().ifBlank { null })
     }
 
-    override suspend fun dailySongs(): List<Song> = request("recommend/songs", emptyMap()).obj("data").array("dailySongs").map(::song)
-    override suspend fun cloudSongs(): List<Song> = request("cloud", mapOf("limit" to "1000")).array("data").map(::song)
-    override suspend fun radios(): List<Radio> = request("personalized/djprogram", mapOf("limit" to "30")).array("result").map { value -> val item = value.jsonObject; Radio(item.long("id"), item.string("name"), item.optionalString("copywriter").orEmpty(), item.optionalString("picUrl")) }
-    override suspend fun videos(songId: Long): List<Video> = request("mv/detail", mapOf("mvid" to songId.toString())).objOrNull("data")?.let { item -> listOf(Video(item.long("id"), item.string("name"), item.optionalString("url"), item.long("duration"), item.optionalString("cover"))) } ?: emptyList()
-    override suspend fun likeComment(songId: Long, commentId: Long, like: Boolean): Boolean { request("comment/like", mapOf("id" to songId.toString(), "cid" to commentId.toString(), "t" to if (like) "1" else "0", "type" to "0"), validateCode = true); return true }
+    override suspend fun refreshAccount(): UserProfile? {
+        _session.value = _session.value.copy(loading = true, error = null)
+        return runCatching {
+            val root = request("/api/nuser/account/get", emptyMap(), validateCode = false)
+            val profile = root.objOrNull("profile")?.let {
+                UserProfile(it.long("userId"), it.string("nickname"), it.optionalString("avatarUrl"), it.int("vipType"))
+            }
+            _session.value = AccountSession(profile = profile)
+            profile
+        }.getOrElse {
+            _session.value = AccountSession(error = it.message)
+            null
+        }
+    }
 
-    private suspend fun request(path: String, parameters: Map<String, String>, validateCode: Boolean = true): JsonObject = client.get(baseUrl.trimEnd('/') + "/" + path) {
-        parameters.forEach { (key, value) -> parameter(key, value) }
-        cookie?.takeIf(String::isNotBlank)?.let { header(HttpHeaders.Cookie, it) }
-    }.body<JsonObject>().also { if (validateCode) check(it["code"]?.jsonPrimitive?.intOrNull in setOf(null, 200)) { "网易云接口错误：${it["code"]}" } }
+    override suspend fun sendPhoneCaptcha(phone: String, countryCode: String): Boolean {
+        val root = request(
+            "/api/sms/captcha/sent",
+            mapOf("ctcode" to countryCode, "secrete" to "music_middleuser_pclogin", "cellphone" to phone),
+        )
+        return root["code"]?.jsonPrimitive?.intOrNull == 200
+    }
 
-    private fun song(value: JsonElement): Song { val item = value.jsonObject; val artists = (item["ar"] ?: item["artists"])?.jsonArray.orEmpty().map { it.jsonObject.string("name") }; val album = (item["al"] ?: item["album"])?.jsonObject
-        return Song(item.long("id"), item.string("name"), artists, album?.optionalString("name").orEmpty(), item["dt"]?.jsonPrimitive?.longOrNull ?: item["duration"]?.jsonPrimitive?.longOrNull ?: 0, album?.optionalString("picUrl"), mvId = item["mv"]?.jsonPrimitive?.longOrNull ?: 0) }
+    override suspend fun loginWithPhone(phone: String, captcha: String, countryCode: String): UserProfile? {
+        request(
+            "/api/w/login/cellphone",
+            mapOf("type" to "1", "https" to "true", "phone" to phone, "countrycode" to countryCode, "captcha" to captcha, "remember" to "true"),
+        )
+        return refreshAccount()
+    }
+
+    override suspend fun logout() {
+        runCatching { request("/api/logout", emptyMap(), validateCode = false) }
+        cookieMutex.withLock { cookies.clear() }
+        SessionStore.clear()
+        _session.value = AccountSession()
+    }
+
+    override suspend fun dailySongs(): List<Song> {
+        if (session.value.loggedIn) {
+            runCatching { request("/api/v3/discovery/recommend/songs", emptyMap()).obj("data").array("dailySongs").map(::song) }
+                .getOrNull()?.takeIf(List<Song>::isNotEmpty)?.let { return it }
+        }
+        return request("/api/personalized/newsong", emptyMap()).array("result").map { value ->
+            value.jsonObject["song"]?.let(::song) ?: song(value)
+        }
+    }
+
+    override suspend fun cloudSongs(): List<Song> = request("/api/v1/cloud/get", mapOf("limit" to "1000", "offset" to "0"))
+        .array("data").mapNotNull { value ->
+            val item = value.jsonObject
+            (item["simpleSong"] ?: value).let(::song)
+        }
+
+    override suspend fun radios(): List<Radio> = request("/api/personalized/djprogram", emptyMap()).array("result").map { value ->
+        val item = value.jsonObject
+        Radio(item.long("id"), item.string("name"), item.optionalString("copywriter").orEmpty(), item.optionalString("picUrl"))
+    }
+
+    override suspend fun videos(songId: Long): List<Video> {
+        val item = request("/api/v1/mv/detail", mapOf("id" to songId.toString())).objOrNull("data") ?: return emptyList()
+        return listOf(Video(item.long("id"), item.string("name"), null, item.long("duration"), item.optionalString("cover")))
+    }
+
+    override suspend fun likeComment(songId: Long, commentId: Long, like: Boolean): Boolean {
+        request(
+            "/api/v1/comment/${if (like) "like" else "unlike"}",
+            mapOf("threadId" to "R_SO_4_$songId", "commentId" to commentId.toString()),
+        )
+        return true
+    }
+
+    private suspend fun request(path: String, data: Map<String, String>, validateCode: Boolean = true): JsonObject {
+        val cookie = cookieHeader()
+        val response = client.submitForm(
+            url = domain + path,
+            formParameters = Parameters.build { data.forEach { (key, value) -> append(key, value) } },
+        ) {
+            header(HttpHeaders.UserAgent, "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)")
+            cookie.takeIf(String::isNotBlank)?.let { header(HttpHeaders.Cookie, it) }
+        }
+        captureCookies(response.headers.getAll(HttpHeaders.SetCookie).orEmpty())
+        val root = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+        val code = root["code"]?.jsonPrimitive?.intOrNull
+        if (validateCode && code !in setOf(null, 200)) error(root.optionalString("message") ?: root.optionalString("msg") ?: "网易云接口错误：$code")
+        return root
+    }
+
+    private suspend fun cookieHeader(): String = cookieMutex.withLock {
+        cookies.entries.joinToString("; ") { (name, value) -> "$name=$value" }
+    }
+
+    private suspend fun captureCookies(headers: List<String>) {
+        if (headers.isEmpty()) return
+        val value = cookieMutex.withLock {
+            headers.forEach { header ->
+                val pair = header.substringBefore(';')
+                val separator = pair.indexOf('=')
+                if (separator > 0) cookies[pair.substring(0, separator).trim()] = pair.substring(separator + 1).trim()
+            }
+            cookies.entries.joinToString("; ") { (name, cookie) -> "$name=$cookie" }
+        }
+        if (value.isNotBlank()) SessionStore.saveCookie(value)
+    }
+
+    private fun song(value: JsonElement): Song {
+        val item = value.jsonObject
+        val artists = (item["ar"] ?: item["artists"])?.jsonArray.orEmpty().map { it.jsonObject }
+        val album = (item["al"] ?: item["album"])?.jsonObject
+        return Song(
+            id = item.long("id"),
+            name = item.string("name"),
+            artists = artists.map { it.string("name") },
+            album = album?.optionalString("name").orEmpty(),
+            durationMs = item["dt"]?.jsonPrimitive?.longOrNull ?: item["duration"]?.jsonPrimitive?.longOrNull ?: 0,
+            coverUrl = album?.optionalString("picUrl"),
+            mvId = item["mv"]?.jsonPrimitive?.longOrNull ?: item["mvid"]?.jsonPrimitive?.longOrNull ?: 0,
+            artistIds = artists.mapNotNull { it["id"]?.jsonPrimitive?.longOrNull },
+            albumId = album?.get("id")?.jsonPrimitive?.longOrNull ?: 0,
+            aliases = item.array("alia").mapNotNull { it.jsonPrimitive.contentOrNull },
+            fee = item.int("fee"),
+        )
+    }
 }
 
 private fun JsonObject.array(key: String) = this[key]?.jsonArray.orEmpty()
 private fun JsonObject.obj(key: String) = getValue(key).jsonObject
-private fun JsonObject.objOrNull(key: String) = this[key]?.jsonObject
+private fun JsonObject.objOrNull(key: String): JsonObject? = this[key]?.let { if (it is JsonNull) null else it.jsonObject }
 private fun JsonObject.string(key: String) = getValue(key).jsonPrimitive.content
-private fun JsonObject.optionalString(key: String) = this[key]?.jsonPrimitive?.contentOrNull
+private fun JsonObject.optionalString(key: String) = this[key]?.let { if (it is JsonNull) null else it.jsonPrimitive.contentOrNull }
 private fun JsonObject.long(key: String) = getValue(key).jsonPrimitive.long
 private fun JsonObject.int(key: String) = this[key]?.jsonPrimitive?.intOrNull ?: 0
+private fun JsonObject.boolean(key: String) = this[key]?.jsonPrimitive?.booleanOrNull ?: false

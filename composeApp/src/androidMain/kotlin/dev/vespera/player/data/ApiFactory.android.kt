@@ -1,3 +1,6 @@
 package dev.vespera.player.data
 
-actual fun createMusicApi(): MusicApi = DemoMusicApi()
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.okhttp.OkHttp
+
+actual fun createMusicApi(): MusicApi = NeteaseMusicApi(HttpClient(OkHttp))

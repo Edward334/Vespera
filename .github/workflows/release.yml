@@ -20,8 +20,8 @@ jobs:
           mkdir -p pacman/usr/lib/vespera pacman/usr/bin
           cp -R composeApp/build/compose/binaries/main/app/Vespera/. pacman/usr/lib/vespera/
           ln -s ../lib/vespera/bin/Vespera pacman/usr/bin/vespera
-          printf 'pkgname = vespera\npkgbase = vespera\npkgver = 1.0.0-1\npkgdesc = Compose Multiplatform music player\nurl = https://github.com/${{ github.repository }}\nbuilddate = %s\npackager = GitHub Actions\nsize = %s\narch = x86_64\nlicense = MIT\n' "$(date +%s)" "$(du -sb pacman/usr | cut -f1)" > pacman/.PKGINFO
-          tar --zstd -cf Vespera-1.0.0-1-x86_64.pkg.tar.zst -C pacman .
+          printf 'pkgname = vespera\npkgbase = vespera\npkgver = 0.2.0-1\npkgdesc = Compose Multiplatform music player\nurl = https://github.com/${{ github.repository }}\nbuilddate = %s\npackager = GitHub Actions\nsize = %s\narch = x86_64\nlicense = AGPL-3.0-only\n' "$(date +%s)" "$(du -sb pacman/usr | cut -f1)" > pacman/.PKGINFO
+          tar --zstd -cf Vespera-0.2.0-1-x86_64.pkg.tar.zst -C pacman .
       - uses: actions/upload-artifact@v4
         with:
           name: vespera-linux

@@ -1,20 +1,24 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package dev.vespera.player.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import dev.vespera.player.data.*
@@ -25,15 +29,15 @@ import dev.vespera.player.model.*
 import dev.vespera.player.player.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import io.github.alexzhirkevich.qrose.rememberQrCodePainter
 
 private val navigationItems = AppDestination.entries
 
 @Composable
 fun VesperaApp(
-    api: MusicApi = DemoMusicApi(),
+    api: MusicApi,
     player: PlayerController = remember { PlayerController(PlatformAudioEngine()) },
 ) {
-    var activeApi by remember { mutableStateOf(api) }
     var destination by remember { mutableStateOf(AppDestination.HOME) }
     var nowPlaying by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
@@ -44,12 +48,12 @@ fun VesperaApp(
     val playbackFeatures = remember { PlaybackFeatures(scope) }
     val playSong: (Song) -> Unit = { song ->
         scope.launch {
-            runCatching { activeApi.streamUrl(song.id) }
+            runCatching { requireNotNull(api.streamUrl(song.id)) { "当前账号或音源无法播放这首歌曲" } }
                 .onSuccess { val resolved = song.copy(streamUrl = it); player.play(resolved); history.record(resolved) }
                 .onFailure { error = it.message ?: "无法获取音频地址" }
         }
     }
-    val downloadSong: (Song) -> Unit = { song -> scope.launch { runCatching { DownloadManager(activeApi).download(song) }.onSuccess { error = "已保存到 $it" }.onFailure { error = it.message ?: "下载失败" } } }
+    val downloadSong: (Song) -> Unit = { song -> scope.launch { runCatching { DownloadManager(api).download(song) }.onSuccess { error = "已保存到 $it" }.onFailure { error = it.message ?: "下载失败" } } }
 
     MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF6750A4), secondary = Color(0xFF006C4C))) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -69,18 +73,18 @@ fun VesperaApp(
                 ) { padding ->
                     Box(Modifier.fillMaxSize().padding(padding)) {
                         if (nowPlaying) {
-                            NowPlayingScreen(activeApi, player, onClose = { nowPlaying = false })
+                            NowPlayingScreen(api, player, onClose = { nowPlaying = false })
                         } else when (destination) {
                             AppDestination.HOME -> HomeScreen(songs, playSong, downloadSong) {
-                                scope.launch { runCatching { activeApi.dailySongs() }.onSuccess { songs = it }.onFailure { error = it.message } }
+                                scope.launch { runCatching { api.dailySongs() }.onSuccess { songs = it }.onFailure { error = it.message } }
                             }
                             AppDestination.SEARCH -> SearchScreen(query, songs, { value ->
                                 query = value
-                                scope.launch { runCatching { activeApi.search(value) }.onSuccess { songs = it }.onFailure { error = it.message } }
+                                scope.launch { runCatching { api.search(value) }.onSuccess { songs = it }.onFailure { error = it.message } }
                             }, playSong, downloadSong)
-                            AppDestination.LIBRARY -> LibraryScreen(activeApi, history.songs.collectAsState().value, playSong, downloadSong, onError = { error = it })
-                            AppDestination.COMMENTS -> CommentsScreen(activeApi, player.state.collectAsState().value.current, onError = { error = it })
-                            AppDestination.SETTINGS -> SettingsScreen(activeApi, playbackFeatures) { url, uid, cookie -> activeApi = NeteaseMusicApi(url, uid, cookie); error = "音乐服务设置已应用" }
+                            AppDestination.LIBRARY -> LibraryScreen(api, history.songs.collectAsState().value, playSong, downloadSong, onError = { error = it })
+                            AppDestination.COMMENTS -> CommentsScreen(api, player.state.collectAsState().value.current, onError = { error = it })
+                            AppDestination.SETTINGS -> SettingsScreen(api, playbackFeatures)
                         }
                     }
                 }
@@ -178,15 +182,12 @@ private fun CommentList(song: Song?, comments: List<Comment>, modifier: Modifier
 }
 
 @Composable
-private fun SettingsScreen(api: MusicApi, playback: PlaybackFeatures, onApplyApi: (String, Long?, String?) -> Unit) {
+private fun SettingsScreen(api: MusicApi, playback: PlaybackFeatures) {
     var crossfade by remember { mutableStateOf(false) }
     var lyricTranslation by remember { mutableStateOf(true) }
     var dynamicColor by remember { mutableStateOf(true) }
     var autoCloseMinutes by remember { mutableFloatStateOf(0f) }
     val equalizer by playback.equalizer.collectAsState()
-    var apiUrl by remember { mutableStateOf("http://127.0.0.1:3000") }
-    var userId by remember { mutableStateOf("") }
-    var cookie by remember { mutableStateOf("") }
     LazyColumn(contentPadding = PaddingValues(20.dp)) {
         item { Text("设置", style = MaterialTheme.typography.headlineMedium) }
         item { SettingsSwitch("淡入淡出", "在相邻歌曲间平滑过渡", crossfade) { crossfade = it } }
@@ -195,31 +196,93 @@ private fun SettingsScreen(api: MusicApi, playback: PlaybackFeatures, onApplyApi
         item { Text("自动关闭：${autoCloseMinutes.toInt()} 分钟", style = MaterialTheme.typography.bodyLarge); Slider(autoCloseMinutes, { autoCloseMinutes = it; if (it > 0) playback.setAutoClose(it.toInt()) {} else playback.cancelAutoClose() }, valueRange = 0f..120f, steps = 11) }
         item { SettingsSwitch("均衡器", "使用 10 段频段调节音色", equalizer.enabled) { playback.setEqualizerEnabled(it) } }
         items(equalizer.bands.size) { index -> Slider(equalizer.bands[index], { playback.setBand(index, it) }, Modifier.fillMaxWidth(), valueRange = -12f..12f) }
-        item { HorizontalDivider(); Text("音乐服务", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp)) }
-        item { OutlinedTextField(apiUrl, { apiUrl = it }, Modifier.fillMaxWidth(), label = { Text("api-enhanced 地址") }, singleLine = true) }
-        item { OutlinedTextField(userId, { userId = it.filter(Char::isDigit) }, Modifier.fillMaxWidth(), label = { Text("网易云用户 ID") }, singleLine = true) }
-        item { OutlinedTextField(cookie, { cookie = it }, Modifier.fillMaxWidth(), label = { Text("MUSIC_U 登录凭据") }, singleLine = true, visualTransformation = PasswordVisualTransformation()) }
-        item { Button({ onApplyApi(apiUrl, userId.toLongOrNull(), cookie.takeIf(String::isNotBlank)) }) { Icon(Icons.Default.Link, null); Spacer(Modifier.width(8.dp)); Text("应用服务设置") } }
-        item { LoginPanel(api) { authorizedCookie -> cookie = authorizedCookie; onApplyApi(apiUrl, userId.toLongOrNull(), authorizedCookie) } }
+        item { HorizontalDivider(); Spacer(Modifier.height(16.dp)); LoginPanel(api) }
         item { ListItem(headlineContent = { Text("均衡器") }, supportingContent = { Text("10 段均衡器与预设") }, leadingContent = { Icon(Icons.Default.Equalizer, null) }) }
         item { ListItem(headlineContent = { Text("下载") }, supportingContent = { Text("音质、保存目录与并发任务") }, leadingContent = { Icon(Icons.Default.Download, null) }) }
-        item { ListItem(headlineContent = { Text("关于 Vespera") }, supportingContent = { Text("版本 1.0.0") }) }
+        item { ListItem(headlineContent = { Text("关于 Vespera") }, supportingContent = { Text("开发版本 0.2.0") }) }
     }
 }
 
 @Composable
-private fun LoginPanel(api: MusicApi, onAuthorized: (String) -> Unit) {
+private fun LoginPanel(api: MusicApi) {
     var qr by remember(api) { mutableStateOf<LoginQr?>(null) }
     var status by remember(api) { mutableStateOf("尚未登录") }
     var loading by remember(api) { mutableStateOf(false) }
+    var method by remember { mutableIntStateOf(0) }
+    var countryCode by remember { mutableStateOf("86") }
+    var phone by remember { mutableStateOf("") }
+    var captcha by remember { mutableStateOf("") }
+    val session by api.session.collectAsState()
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(api) { api.refreshAccount() }
+    LaunchedEffect(qr?.key) {
+        val key = qr?.key ?: return@LaunchedEffect
+        while (true) {
+            delay(1500)
+            val attempt = runCatching { api.checkLoginQr(key) }
+            if (attempt.isFailure) {
+                status = attempt.exceptionOrNull()?.message.orEmpty()
+                return@LaunchedEffect
+            }
+            val result = attempt.getOrThrow()
+            status = result.message.ifBlank { result.status.label() }
+            if (result.status in setOf(LoginStatus.AUTHORIZED, LoginStatus.EXPIRED, LoginStatus.ERROR)) break
+        }
+    }
+
     Column(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalAlignment = Alignment.Start) {
         Text("网易云账号", style = MaterialTheme.typography.titleMedium)
-        Text(status, style = MaterialTheme.typography.bodyMedium)
-        qr?.imageData?.takeIf(String::isNotBlank)?.let { AsyncImage(it, "网易云登录二维码", Modifier.size(200.dp).align(Alignment.CenterHorizontally)) }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(enabled = !loading, onClick = { scope.launch { loading = true; runCatching { api.createLoginQr() }.onSuccess { qr = it; status = "请使用网易云音乐扫码" }.onFailure { status = it.message.orEmpty() }; loading = false } }) { Text("生成二维码") }
-            OutlinedButton(enabled = qr != null && !loading, onClick = { scope.launch { loading = true; runCatching { api.checkLoginQr(requireNotNull(qr).key) }.onSuccess { result -> status = result.message.ifBlank { result.status.label() }; if (result.status == LoginStatus.AUTHORIZED) result.cookie?.let(onAuthorized) }.onFailure { status = it.message.orEmpty() }; loading = false } }) { Text("检查状态") }
+        if (session.loggedIn) {
+            val profile = requireNotNull(session.profile)
+            ListItem(
+                headlineContent = { Text(profile.nickname) },
+                supportingContent = { Text("网易云 ID ${profile.id}") },
+                leadingContent = { profile.avatarUrl?.let { AsyncImage(it, null, Modifier.size(48.dp)) } ?: Icon(Icons.Default.AccountCircle, null) },
+                trailingContent = { OutlinedButton(onClick = { scope.launch { api.logout() } }) { Text("退出") } },
+            )
+            return@Column
+        }
+        SecondaryTabRow(method) {
+            Tab(method == 0, { method = 0 }, text = { Text("扫码登录") })
+            Tab(method == 1, { method = 1 }, text = { Text("手机号登录") })
+        }
+        Spacer(Modifier.height(12.dp))
+        if (method == 0) {
+            Text(status, style = MaterialTheme.typography.bodyMedium)
+            qr?.payload?.let { payload ->
+                Image(rememberQrCodePainter(payload), "网易云登录二维码", Modifier.size(220.dp).align(Alignment.CenterHorizontally))
+            }
+            Button(
+                enabled = !loading,
+                onClick = {
+                    scope.launch {
+                        loading = true
+                        runCatching { api.createLoginQr() }
+                            .onSuccess { qr = it; status = "请使用网易云音乐扫码，应用会自动确认" }
+                            .onFailure { status = it.message.orEmpty() }
+                        loading = false
+                    }
+                },
+            ) { Icon(Icons.Default.QrCode2, null); Spacer(Modifier.width(8.dp)); Text(if (qr == null) "生成二维码" else "刷新二维码") }
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(countryCode, { countryCode = it.filter(Char::isDigit) }, Modifier.width(96.dp), label = { Text("区号") }, singleLine = true)
+                OutlinedTextField(phone, { phone = it.filter(Char::isDigit) }, Modifier.weight(1f), label = { Text("手机号") }, singleLine = true)
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(captcha, { captcha = it.filter(Char::isDigit) }, Modifier.weight(1f), label = { Text("验证码") }, singleLine = true)
+                OutlinedButton(
+                    enabled = phone.isNotBlank() && !loading,
+                    onClick = { scope.launch { loading = true; status = runCatching { if (api.sendPhoneCaptcha(phone, countryCode)) "验证码已发送" else "验证码发送失败" }.getOrElse { it.message.orEmpty() }; loading = false } },
+                ) { Text("获取验证码") }
+            }
+            Button(
+                enabled = phone.isNotBlank() && captcha.isNotBlank() && !loading,
+                onClick = { scope.launch { loading = true; status = runCatching { api.loginWithPhone(phone, captcha, countryCode); "登录成功" }.getOrElse { it.message.orEmpty() }; loading = false } },
+                modifier = Modifier.padding(top = 8.dp),
+            ) { Text("登录") }
         }
     }
 }
@@ -256,7 +319,7 @@ private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: (
     val state by player.state.collectAsState()
     val song = state.current ?: return
     var tab by remember { mutableIntStateOf(0) }
-    var lyric by remember { mutableStateOf("") }
+    var lyric by remember { mutableStateOf(LyricBundle()) }
     var comments by remember { mutableStateOf(emptyList<Comment>()) }
     var videos by remember { mutableStateOf(emptyList<Video>()) }
     var rate by remember { mutableFloatStateOf(1f) }
@@ -264,7 +327,7 @@ private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: (
     val abLoop = remember { AbLoopController() }
     val abState by abLoop.state.collectAsState()
     LaunchedEffect(song.id) {
-        runCatching { lyric = api.lyric(song.id) }
+        runCatching { lyric = api.lyrics(song.id) }
         runCatching { comments = api.comments(song.id) }
         if (song.mvId > 0) runCatching { videos = api.videos(song.mvId) }
     }
@@ -274,7 +337,7 @@ private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: (
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(onClose) { Icon(Icons.Default.KeyboardArrowDown, "收起播放页") }; Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) { Text(song.name, fontWeight = FontWeight.SemiBold); Text(song.artists.joinToString(" · "), style = MaterialTheme.typography.bodySmall) }; Spacer(Modifier.width(48.dp)) }
         PrimaryTabRow(tab) { listOf("歌词", "播放队列", "评论", "视频").forEachIndexed { index, label -> Tab(tab == index, { tab = index }, text = { Text(label) }) } }
         when (tab) {
-            0 -> LyricsView(lyric, state.positionMs, Modifier.fillMaxSize().padding(horizontal = 24.dp))
+            0 -> LyricsView(lyric, state.positionMs, { player.seek(it) }, Modifier.fillMaxSize().padding(horizontal = 24.dp))
             1 -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp)) { items(state.queue, key = Song::id) { SongRow(it, player::play) } }
             2 -> CommentList(song, comments, Modifier.fillMaxSize())
             else -> VideoList(videos)
@@ -294,13 +357,51 @@ private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: (
 @Composable private fun VideoList(videos: List<Video>) = if (videos.isEmpty()) EmptyFeature("暂无视频", "这首歌曲没有可用的音乐视频") else LazyColumn(contentPadding = PaddingValues(20.dp)) { items(videos, key = Video::id) { ListItem(headlineContent = { Text(it.title) }, supportingContent = { Text(it.url.orEmpty()) }, leadingContent = { Icon(Icons.Default.VideoLibrary, null) }) } }
 
 @Composable
-fun LyricsView(lrc: String, positionMs: Long, modifier: Modifier = Modifier) {
-    val lines = remember(lrc) { LyricParser.parse(lrc) }
+fun LyricsView(bundle: LyricBundle, positionMs: Long, onSeek: (Long) -> Unit, modifier: Modifier = Modifier) {
+    val lines = remember(bundle) { LyricParser.parse(bundle) }
     val active = lines.activeIndex(positionMs)
-    LazyColumn(modifier, contentPadding = PaddingValues(vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(active) { if (active >= 0) listState.animateScrollToItem((active - 2).coerceAtLeast(0)) }
+    LazyColumn(modifier, state = listState, contentPadding = PaddingValues(vertical = 120.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
         items(lines.size) { index ->
-            val progress = lines[index].words.firstOrNull()?.let { word -> ((positionMs - word.startMs).toFloat() / (word.endMs - word.startMs).coerceAtLeast(1)).coerceIn(0f, 1f) } ?: 0f
-            Text(lines[index].words.joinToString("") { it.text }, style = if (index == active) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.bodyLarge, color = if (index == active) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f + progress * 0.3f) else MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = if (index == active) FontWeight.Bold else FontWeight.Normal)
+            AppleLyricLine(lines[index], positionMs, index == active) { onSeek(lines[index].startMs) }
         }
+    }
+}
+
+@Composable
+private fun AppleLyricLine(line: LyricLine, positionMs: Long, active: Boolean, onClick: () -> Unit) {
+    val scale by androidx.compose.animation.core.animateFloatAsState(if (active) 1.04f else 1f)
+    Column(
+        Modifier.fillMaxWidth().graphicsLayer { scaleX = scale; scaleY = scale; alpha = if (active) 1f else 0.55f }.clickable(onClick = onClick),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(1.dp)) {
+            line.words.forEach { word -> AppleLyricWord(word, positionMs, active) }
+        }
+        line.translation?.takeIf(String::isNotBlank)?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (active) 0.82f else 0.55f)) }
+        line.romanization?.takeIf(String::isNotBlank)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (active) 0.72f else 0.45f)) }
+    }
+}
+
+@Composable
+private fun AppleLyricWord(word: LyricWord, positionMs: Long, active: Boolean) {
+    val progress = when {
+        positionMs <= word.startMs -> 0f
+        positionMs >= word.endMs -> 1f
+        else -> (positionMs - word.startMs).toFloat() / (word.endMs - word.startMs).coerceAtLeast(1)
+    }
+    val style = if (active) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.titleMedium
+    Box {
+        Text(word.text, style = style, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            word.text,
+            style = style,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.drawWithContent {
+                clipRect(right = size.width * progress) { this@drawWithContent.drawContent() }
+            },
+        )
     }
 }

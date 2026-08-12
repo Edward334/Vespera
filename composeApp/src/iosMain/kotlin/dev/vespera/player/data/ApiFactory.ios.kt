@@ -1,11 +1,6 @@
 package dev.vespera.player.data
 
-import platform.Foundation.NSProcessInfo
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.darwin.Darwin
 
-actual fun createMusicApi(): MusicApi {
-    val environment = NSProcessInfo.processInfo.environment
-    val url = environment["VESPERA_API_URL"] as? String ?: return DemoMusicApi()
-    val uid = (environment["VESPERA_USER_ID"] as? String)?.toLongOrNull()
-    val cookie = environment["VESPERA_COOKIE"] as? String
-    return NeteaseMusicApi(url, uid, cookie)
-}
+actual fun createMusicApi(): MusicApi = NeteaseMusicApi(HttpClient(Darwin))
