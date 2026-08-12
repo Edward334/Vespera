@@ -4,6 +4,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable data class Song(val id: Long, val name: String, val artists: List<String>, val album: String = "", val durationMs: Long = 0, val coverUrl: String? = null, val streamUrl: String? = null, val mvId: Long = 0, val artistIds: List<Long> = emptyList(), val albumId: Long = 0, val aliases: List<String> = emptyList(), val quality: String? = null, val fee: Int = 0)
 @Serializable data class Playlist(val id: Long, val name: String, val trackCount: Int, val coverUrl: String? = null, val isCloud: Boolean = false, val description: String = "", val creator: String = "", val subscribed: Boolean = false)
+data class PlaylistDetail(val playlist: Playlist, val tracks: List<Song>)
 @Serializable data class Artist(val id: Long, val name: String, val coverUrl: String? = null, val aliases: List<String> = emptyList(), val albumCount: Int = 0, val songCount: Int = 0)
 @Serializable data class Album(val id: Long, val name: String, val artist: String = "", val coverUrl: String? = null, val songCount: Int = 0, val publishTime: Long = 0)
 @Serializable data class Comment(val id: Long, val user: String, val avatarUrl: String?, val content: String, val likedCount: Int, val timeLabel: String, val liked: Boolean = false, val replyContent: String? = null)

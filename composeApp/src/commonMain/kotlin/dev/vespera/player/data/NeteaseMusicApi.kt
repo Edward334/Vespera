@@ -75,15 +75,24 @@ class NeteaseMusicApi(
             }
     }
 
-    override suspend fun playlistTracks(id: Long): List<Song> {
-        val playlist = request("/api/v6/playlist/detail", mapOf("id" to id.toString(), "n" to "100000", "s" to "8")).obj("playlist")
-        val ids = playlist.array("trackIds").mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.longOrNull }
-        if (ids.isEmpty()) return playlist.array("tracks").map(::song)
-        return ids.chunked(500).flatMap { chunk ->
+    override suspend fun playlistDetail(id: Long): PlaylistDetail {
+        val root = request("/api/v6/playlist/detail", mapOf("id" to id.toString(), "n" to "100000", "s" to "8"))
+        val playlistObject = root.obj("playlist")
+        val metadata = playlist(playlistObject)
+        val ids = playlistObject.array("trackIds").mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.longOrNull }
+        val tracks = if (ids.isEmpty()) {
+            playlistObject.array("tracks").map(::song)
+        } else {
+            val byId = ids.chunked(500).flatMap { chunk ->
             val payload = buildJsonArray { chunk.forEach { add(buildJsonObject { put("id", it) }) } }.toString()
             request("/api/v3/song/detail", mapOf("c" to payload)).array("songs").map(::song)
+            }.associateBy(Song::id)
+            ids.mapNotNull(byId::get)
         }
+        return PlaylistDetail(metadata.copy(trackCount = maxOf(metadata.trackCount, tracks.size)), tracks)
     }
+
+    override suspend fun playlistTracks(id: Long): List<Song> = playlistDetail(id).tracks
 
     override suspend fun lyrics(songId: Long): LyricBundle {
         val root = request(

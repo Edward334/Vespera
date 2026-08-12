@@ -118,4 +118,35 @@ class NeteaseMusicApiTest {
         assertEquals(listOf("Suggestion one", "Suggestion two"), api.searchSuggestions("Suggestion"))
         assertEquals(listOf("/api/search/hot/detail", "/api/search/suggest/web"), paths)
     }
+
+    @Test
+    fun playlistDetailLoadsEveryTrackInPlaylistOrder() = runTest {
+        val paths = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            paths += request.url.encodedPath
+            val content = when (request.url.encodedPath) {
+                "/api/v6/playlist/detail" -> """{"code":200,"playlist":{"id":42,"name":"Playlist","trackCount":2,"coverImgUrl":"cover","description":"Description","creator":{"nickname":"Creator"},"trackIds":[{"id":1},{"id":2}]}}"""
+                "/api/v3/song/detail" -> {
+                    val body = request.body as FormDataContent
+                    assertTrue(body.formData["c"].orEmpty().contains("\"id\":1"))
+                    assertTrue(body.formData["c"].orEmpty().contains("\"id\":2"))
+                    """{"code":200,"songs":[{"id":2,"name":"Second","ar":[{"name":"Artist"}],"al":{"name":"Album"}},{"id":1,"name":"First","ar":[{"name":"Artist"}],"al":{"name":"Album"}}]}"""
+                }
+                else -> error("Unexpected endpoint: ${request.url.encodedPath}")
+            }
+            respond(
+                content = content,
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+
+        val detail = NeteaseMusicApi(HttpClient(engine), storedCookie = "").playlistDetail(42)
+
+        assertEquals("Playlist", detail.playlist.name)
+        assertEquals("Creator", detail.playlist.creator)
+        assertEquals("Description", detail.playlist.description)
+        assertEquals(listOf(1L, 2L), detail.tracks.map { it.id })
+        assertEquals(listOf("/api/v6/playlist/detail", "/api/v3/song/detail"), paths)
+    }
 }

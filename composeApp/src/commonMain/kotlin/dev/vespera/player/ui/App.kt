@@ -7,6 +7,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -41,6 +42,7 @@ fun VesperaApp(
 ) {
     var destination by remember { mutableStateOf(AppDestination.HOME) }
     var nowPlaying by remember { mutableStateOf(false) }
+    var openedPlaylist by remember { mutableStateOf<Playlist?>(null) }
     var songs by remember { mutableStateOf(emptyList<Song>()) }
     val history = remember { HistoryRepository() }
     var error by remember { mutableStateOf<String?>(null) }
@@ -59,27 +61,40 @@ fun VesperaApp(
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val expanded = maxWidth >= 720.dp
             Row(Modifier.fillMaxSize()) {
-                if (expanded) AppNavigationRail(destination) { destination = it; nowPlaying = false }
+                if (expanded) AppNavigationRail(destination) { destination = it; nowPlaying = false; openedPlaylist = null }
                 Scaffold(
                     modifier = Modifier.weight(1f),
-                    topBar = { AppTopBar { destination = AppDestination.SETTINGS; nowPlaying = false } },
+                    topBar = { AppTopBar { destination = AppDestination.SETTINGS; nowPlaying = false; openedPlaylist = null } },
                     bottomBar = {
                         Column {
-                            PlayerBar(player, onExpand = { nowPlaying = true })
-                            if (!expanded) AppNavigationBar(destination) { destination = it; nowPlaying = false }
+                            PlayerBar(player, onExpand = { nowPlaying = true }, onPlay = playSong)
+                            if (!expanded) AppNavigationBar(destination) { destination = it; nowPlaying = false; openedPlaylist = null }
                         }
                     },
                     snackbarHost = { error?.let { message -> Snackbar { Text(message) }; LaunchedEffect(message) { error = null } } },
                 ) { padding ->
                     Box(Modifier.fillMaxSize().padding(padding)) {
                         if (nowPlaying) {
-                            NowPlayingScreen(api, player, onClose = { nowPlaying = false })
+                            NowPlayingScreen(api, player, onClose = { nowPlaying = false }, onPlay = playSong)
+                        } else if (openedPlaylist != null) {
+                            PlaylistDetailScreen(
+                                api = api,
+                                playlist = requireNotNull(openedPlaylist),
+                                onBack = { openedPlaylist = null },
+                                onPlay = playSong,
+                                onPlayAll = { tracks ->
+                                    player.replaceQueue(tracks)
+                                    tracks.firstOrNull()?.let(playSong)
+                                },
+                                onDownload = downloadSong,
+                                onError = { error = it },
+                            )
                         } else when (destination) {
                             AppDestination.HOME -> HomeScreen(songs, playSong, downloadSong) {
                                 scope.launch { runCatching { api.dailySongs() }.onSuccess { songs = it }.onFailure { error = it.message } }
                             }
-                            AppDestination.SEARCH -> SearchScreen(api, playSong, downloadSong, onError = { error = it })
-                            AppDestination.LIBRARY -> LibraryScreen(api, history.songs.collectAsState().value, playSong, downloadSong, onError = { error = it })
+                            AppDestination.SEARCH -> SearchScreen(api, playSong, downloadSong, onOpenPlaylist = { openedPlaylist = it }, onError = { error = it })
+                            AppDestination.LIBRARY -> LibraryScreen(api, history.songs.collectAsState().value, playSong, downloadSong, onOpenPlaylist = { openedPlaylist = it }, onError = { error = it })
                             AppDestination.COMMENTS -> CommentsScreen(api, player.state.collectAsState().value.current, onError = { error = it })
                             AppDestination.SETTINGS -> SettingsScreen(api, playbackFeatures)
                         }
@@ -137,6 +152,7 @@ private fun SearchScreen(
     api: MusicApi,
     onPlay: (Song) -> Unit,
     onDownload: (Song) -> Unit,
+    onOpenPlaylist: (Playlist) -> Unit,
     onError: (String) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
@@ -245,6 +261,7 @@ private fun SearchScreen(
             result = result,
             onPlay = onPlay,
             onDownload = onDownload,
+            onOpenPlaylist = onOpenPlaylist,
             loadingMore = loadingMore,
             onLoadMore = {
                 val keyword = query.trim()
@@ -303,6 +320,7 @@ private fun SearchResults(
     result: SearchPage?,
     onPlay: (Song) -> Unit,
     onDownload: (Song) -> Unit,
+    onOpenPlaylist: (Playlist) -> Unit,
     loadingMore: Boolean,
     onLoadMore: () -> Unit,
 ) {
@@ -318,7 +336,7 @@ private fun SearchResults(
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         items(result.songs, key = Song::id) { SongRow(it, onPlay, onDownload) }
-        items(result.playlists, key = Playlist::id) { item -> CatalogRow(item.name, "${item.creator} · ${item.trackCount} 首", item.coverUrl, Icons.Default.QueueMusic) }
+        items(result.playlists, key = Playlist::id) { item -> CatalogRow(item.name, "${item.creator} · ${item.trackCount} 首", item.coverUrl, Icons.Default.QueueMusic) { onOpenPlaylist(item) } }
         items(result.artists, key = Artist::id) { item -> CatalogRow(item.name, "${item.albumCount} 张专辑 · ${item.songCount} 首歌曲", item.coverUrl, Icons.Default.Person) }
         items(result.albums, key = Album::id) { item -> CatalogRow(item.name, "${item.artist} · ${item.songCount} 首", item.coverUrl, Icons.Default.Album) }
         items(result.videos, key = Video::id) { item -> CatalogRow(item.title, item.creator.ifBlank { "视频" }, item.coverUrl, Icons.Default.VideoLibrary) }
@@ -335,7 +353,14 @@ private fun SearchResults(
 }
 
 @Composable
-private fun CatalogRow(title: String, supporting: String, coverUrl: String?, icon: androidx.compose.ui.graphics.vector.ImageVector) = ListItem(
+private fun CatalogRow(
+    title: String,
+    supporting: String,
+    coverUrl: String?,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: (() -> Unit)? = null,
+) = ListItem(
+    modifier = if (onClick == null) Modifier else Modifier.clickable(onClick = onClick),
     headlineContent = { Text(title, maxLines = 1) },
     supportingContent = { Text(supporting, maxLines = 2) },
     leadingContent = { if (coverUrl != null) AsyncImage(coverUrl, null, Modifier.size(48.dp)) else Icon(icon, null) },
@@ -352,7 +377,84 @@ private fun SearchPage.append(next: SearchPage) = copy(
 )
 
 @Composable
-private fun LibraryScreen(api: MusicApi, history: List<Song>, onPlay: (Song) -> Unit, onDownload: (Song) -> Unit, onError: (String) -> Unit) {
+private fun PlaylistDetailScreen(
+    api: MusicApi,
+    playlist: Playlist,
+    onBack: () -> Unit,
+    onPlay: (Song) -> Unit,
+    onPlayAll: (List<Song>) -> Unit,
+    onDownload: (Song) -> Unit,
+    onError: (String) -> Unit,
+) {
+    var detail by remember(playlist.id) { mutableStateOf<PlaylistDetail?>(null) }
+    var loading by remember(playlist.id) { mutableStateOf(true) }
+
+    LaunchedEffect(playlist.id) {
+        loading = true
+        try {
+            detail = api.playlistDetail(playlist.id)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            onError(error.message ?: "歌单加载失败")
+        } finally {
+            loading = false
+        }
+    }
+
+    val metadata = detail?.playlist ?: playlist
+    val tracks = detail?.tracks.orEmpty()
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        item {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onBack) { Icon(Icons.Default.ArrowBack, "返回") }
+                Text("歌单详情", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (metadata.coverUrl != null) AsyncImage(metadata.coverUrl, null, Modifier.size(112.dp))
+                else Icon(Icons.Default.QueueMusic, null, Modifier.size(88.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(metadata.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    Text("${metadata.creator} · ${metadata.trackCount} 首歌曲", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    metadata.description.takeIf(String::isNotBlank)?.let { Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 4) }
+                    Button(
+                        enabled = tracks.isNotEmpty(),
+                        onClick = { onPlayAll(tracks) },
+                    ) {
+                        Icon(Icons.Default.PlayArrow, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("全部播放")
+                    }
+                }
+            }
+        }
+        if (loading) {
+            item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+        } else if (tracks.isEmpty()) {
+            item { Text("歌单中没有可播放的歌曲", Modifier.padding(20.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        } else {
+            itemsIndexed(tracks, key = { _, song -> song.id }) { index, song ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("${index + 1}", Modifier.width(44.dp).padding(start = 20.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Box(Modifier.weight(1f)) { SongRow(song, onPlay, onDownload) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LibraryScreen(api: MusicApi, history: List<Song>, onPlay: (Song) -> Unit, onDownload: (Song) -> Unit, onOpenPlaylist: (Playlist) -> Unit, onError: (String) -> Unit) {
     var playlists by remember { mutableStateOf(emptyList<Playlist>()) }
     var cloud by remember { mutableStateOf(emptyList<Song>()) }
     var local by remember { mutableStateOf(emptyList<Song>()) }
@@ -363,7 +465,7 @@ private fun LibraryScreen(api: MusicApi, history: List<Song>, onPlay: (Song) -> 
         Text("我的音乐库", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(20.dp))
         PrimaryTabRow(tab) { listOf("歌单", "云盘", "历史", "本地").forEachIndexed { index, label -> Tab(tab == index, { tab = index; when (index) { 1 -> scope.launch { runCatching { cloud = api.cloudSongs() }.onFailure { onError(it.message.orEmpty()) } }; 3 -> local = LocalMusicScanner.scan() } }, text = { Text(label) }) } }
         when (tab) {
-            0 -> LazyColumn(contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { items(playlists, key = Playlist::id) { ListItem(headlineContent = { Text(it.name) }, supportingContent = { Text("${it.trackCount} 首歌曲") }, leadingContent = { Icon(Icons.Default.QueueMusic, null) }) } }
+            0 -> LazyColumn(contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { items(playlists, key = Playlist::id) { playlist -> ListItem(modifier = Modifier.clickable { onOpenPlaylist(playlist) }, headlineContent = { Text(playlist.name) }, supportingContent = { Text("${playlist.trackCount} 首歌曲") }, leadingContent = { if (playlist.coverUrl != null) AsyncImage(playlist.coverUrl, null, Modifier.size(48.dp)) else Icon(Icons.Default.QueueMusic, null) }, trailingContent = { Icon(Icons.Default.ChevronRight, null) }) } }
             1 -> SongList(cloud, onPlay, onDownload)
             2 -> SongList(history, onPlay, onDownload)
             else -> SongList(local, onPlay, onDownload)
@@ -509,20 +611,22 @@ private fun SongRow(song: Song, onPlay: (Song) -> Unit, onDownload: ((Song) -> U
 )
 
 @Composable
-private fun PlayerBar(player: PlayerController, onExpand: () -> Unit) {
+private fun PlayerBar(player: PlayerController, onExpand: () -> Unit, onPlay: (Song) -> Unit) {
     val state by player.state.collectAsState()
     val current = state.current ?: return
     Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth().clickable(onClick = onExpand)) {
         Row(Modifier.heightIn(min = 64.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) { Text(current.name, fontWeight = FontWeight.Medium); Text(current.artists.joinToString(" · "), style = MaterialTheme.typography.bodySmall) }
+            IconButton({ player.previousSong()?.let(onPlay) }) { Icon(Icons.Default.SkipPrevious, "上一首") }
             IconButton(player::toggle) { Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停") }
+            IconButton({ player.nextSong()?.let(onPlay) }) { Icon(Icons.Default.SkipNext, "下一首") }
             IconButton(player::cycleRepeat) { Icon(Icons.Default.Repeat, state.repeat.label()) }
         }
     }
 }
 
 @Composable
-private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: () -> Unit) {
+private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: () -> Unit, onPlay: (Song) -> Unit) {
     val state by player.state.collectAsState()
     val song = state.current ?: return
     var tab by remember { mutableIntStateOf(0) }
@@ -545,7 +649,7 @@ private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: (
         PrimaryTabRow(tab) { listOf("歌词", "播放队列", "评论", "视频").forEachIndexed { index, label -> Tab(tab == index, { tab = index }, text = { Text(label) }) } }
         when (tab) {
             0 -> LyricsView(lyric, state.positionMs, { player.seek(it) }, Modifier.fillMaxSize().padding(horizontal = 24.dp))
-            1 -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp)) { items(state.queue, key = Song::id) { SongRow(it, player::play) } }
+            1 -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp)) { items(state.queue, key = Song::id) { SongRow(it, onPlay) } }
             2 -> CommentList(song, comments, Modifier.fillMaxSize())
             else -> VideoList(videos)
         }
@@ -556,7 +660,7 @@ private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: (
                 AssistChip(onClick = { when (abStage) { 0 -> { abLoop.setStart(state.positionMs); abStage = 1 }; 1 -> { abLoop.setEnd(state.positionMs); abStage = 2 }; else -> { abLoop.clear(); abStage = 0 } } }, label = { Text(when (abStage) { 0 -> "设置 A 点"; 1 -> "设置 B 点"; else -> "AB 循环中" }) })
                 if (abStage == 2) TextButton({ abLoop.clear(); abStage = 0 }) { Text("清除 AB") }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) { IconButton(player::cycleRepeat) { Icon(Icons.Default.Repeat, state.repeat.label()) }; IconButton(player::previous) { Icon(Icons.Default.SkipPrevious, "上一首") }; IconButton(player::toggle, Modifier.size(64.dp)) { Icon(if (state.playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "播放或暂停", Modifier.size(48.dp)) }; IconButton(player::next) { Icon(Icons.Default.SkipNext, "下一首") } }
+            Row(verticalAlignment = Alignment.CenterVertically) { IconButton(player::cycleRepeat) { Icon(Icons.Default.Repeat, state.repeat.label()) }; IconButton({ player.previousSong()?.let(onPlay) }) { Icon(Icons.Default.SkipPrevious, "上一首") }; IconButton(player::toggle, Modifier.size(64.dp)) { Icon(if (state.playing) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "播放或暂停", Modifier.size(48.dp)) }; IconButton({ player.nextSong()?.let(onPlay) }) { Icon(Icons.Default.SkipNext, "下一首") } }
         }
     }
 }

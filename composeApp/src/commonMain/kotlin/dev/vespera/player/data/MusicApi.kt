@@ -10,6 +10,7 @@ interface MusicApi {
     suspend fun hotSearch(): List<String>
     suspend fun searchSuggestions(keyword: String): List<String>
     suspend fun playlists(): List<Playlist>
+    suspend fun playlistDetail(id: Long): PlaylistDetail
     suspend fun playlistTracks(id: Long): List<Song>
     suspend fun lyrics(songId: Long): LyricBundle
     suspend fun comments(songId: Long, page: Int = 1): List<Comment>
