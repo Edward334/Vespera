@@ -107,13 +107,89 @@ class NeteaseMusicApi(
         )
     }
 
-    override suspend fun comments(songId: Long, page: Int): List<Comment> = request(
-        "/api/v1/resource/comments/R_SO_4_$songId",
-        mapOf("rid" to songId.toString(), "limit" to "20", "offset" to ((page - 1) * 20).toString(), "beforeTime" to "0"),
-    ).array("comments").map { value ->
+    override suspend fun comments(songId: Long, page: Int): List<Comment> = commentPage(songId, page).comments
+
+    override suspend fun commentPage(songId: Long, page: Int, sort: CommentSort, cursor: Long?): CommentPage {
+        val requestCursor = when (sort) {
+            CommentSort.RECOMMENDED -> ((page - 1) * 20).toString()
+            CommentSort.HOT -> "normalHot#${(page - 1) * 20}"
+            CommentSort.NEWEST -> cursor?.toString() ?: "0"
+        }
+        val data = request(
+            "/api/v2/resource/comments",
+            mapOf(
+                "threadId" to "R_SO_4_$songId",
+                "pageNo" to page.toString(),
+                "showInner" to "true",
+                "pageSize" to "20",
+                "cursor" to requestCursor,
+                "sortType" to sort.code.toString(),
+            ),
+        ).obj("data")
+        val comments = data.array("comments").map(::comment)
+        return CommentPage(
+            comments = comments,
+            totalCount = data.int("totalCount"),
+            hasMore = data.boolean("hasMore"),
+            nextCursor = data.optionalLong("cursor") ?: comments.lastOrNull()?.timeMs,
+        )
+    }
+
+    override suspend fun hotComments(songId: Long, page: Int): CommentPage {
+        val root = request(
+            "/api/v1/resource/hotcomments/R_SO_4_$songId",
+            mapOf("rid" to songId.toString(), "limit" to "20", "offset" to ((page - 1) * 20).toString(), "beforeTime" to "0"),
+        )
+        val comments = root.array("hotComments").map(::comment)
+        return CommentPage(comments, hasMore = root.boolean("hasMore"), nextCursor = comments.lastOrNull()?.timeMs)
+    }
+
+    override suspend fun commentReplies(songId: Long, parentCommentId: Long, cursor: Long?): CommentPage {
+        val data = request(
+            "/api/resource/comment/floor/get",
+            mapOf(
+                "parentCommentId" to parentCommentId.toString(),
+                "threadId" to "R_SO_4_$songId",
+                "time" to (cursor ?: -1).toString(),
+                "limit" to "20",
+            ),
+        ).obj("data")
+        val comments = data.array("comments").map(::comment)
+        return CommentPage(comments, hasMore = data.boolean("hasMore"), nextCursor = data.optionalLong("time") ?: comments.lastOrNull()?.timeMs)
+    }
+
+    override suspend fun postComment(songId: Long, content: String, replyToCommentId: Long?): Boolean {
+        require(content.isNotBlank()) { "评论内容不能为空" }
+        val common = mutableMapOf(
+            "threadId" to "R_SO_4_$songId",
+            "content" to content.trim(),
+            "resourceType" to "0",
+        )
+        val path = if (replyToCommentId == null) {
+            common["expressionPicId"] = "-1"
+            common["bubbleId"] = "-1"
+            "/api/resource/comments/add"
+        } else {
+            common["commentId"] = replyToCommentId.toString()
+            "/api/v1/resource/comments/reply"
+        }
+        request(path, common)
+        return true
+    }
+
+    override suspend fun hugComment(songId: Long, commentId: Long, targetUserId: Long): Boolean {
+        request(
+            "/api/v2/resource/comments/hug/listener",
+            mapOf("targetUserId" to targetUserId.toString(), "commentId" to commentId.toString(), "threadId" to "R_SO_4_$songId"),
+        )
+        return true
+    }
+
+    private fun comment(value: JsonElement): Comment {
         val item = value.jsonObject
         val user = item.obj("user")
-        Comment(
+        val replied = item.array("beReplied").firstOrNull()?.jsonObject
+        return Comment(
             id = item.long("commentId"),
             user = user.string("nickname"),
             avatarUrl = user.optionalString("avatarUrl"),
@@ -121,7 +197,12 @@ class NeteaseMusicApi(
             likedCount = item.int("likedCount"),
             timeLabel = item.optionalString("timeStr").orEmpty(),
             liked = item.boolean("liked"),
-            replyContent = item.array("beReplied").firstOrNull()?.jsonObject?.optionalString("content"),
+            replyContent = replied?.optionalString("content"),
+            userId = user.optionalLong("userId") ?: 0,
+            timeMs = item.optionalLong("time") ?: 0,
+            ipLocation = item.objOrNull("ipLocation")?.optionalString("location").orEmpty(),
+            replyUser = replied?.objOrNull("user")?.optionalString("nickname"),
+            replyCount = item.objOrNull("showFloorComment")?.int("replyCount") ?: 0,
         )
     }
 
@@ -333,11 +414,12 @@ class NeteaseMusicApi(
     }
 }
 
-private fun JsonObject.array(key: String) = this[key]?.jsonArray.orEmpty()
+private fun JsonObject.array(key: String) = (this[key] as? JsonArray).orEmpty()
 private fun JsonObject.obj(key: String) = getValue(key).jsonObject
 private fun JsonObject.objOrNull(key: String): JsonObject? = this[key]?.let { if (it is JsonNull) null else it.jsonObject }
 private fun JsonObject.string(key: String) = getValue(key).jsonPrimitive.content
 private fun JsonObject.optionalString(key: String) = this[key]?.let { if (it is JsonNull) null else it.jsonPrimitive.contentOrNull }
 private fun JsonObject.long(key: String) = getValue(key).jsonPrimitive.long
+private fun JsonObject.optionalLong(key: String) = this[key]?.jsonPrimitive?.longOrNull
 private fun JsonObject.int(key: String) = this[key]?.jsonPrimitive?.intOrNull ?: 0
 private fun JsonObject.boolean(key: String) = this[key]?.jsonPrimitive?.booleanOrNull ?: false

@@ -14,6 +14,11 @@ interface MusicApi {
     suspend fun playlistTracks(id: Long): List<Song>
     suspend fun lyrics(songId: Long): LyricBundle
     suspend fun comments(songId: Long, page: Int = 1): List<Comment>
+    suspend fun commentPage(songId: Long, page: Int = 1, sort: CommentSort = CommentSort.RECOMMENDED, cursor: Long? = null): CommentPage
+    suspend fun hotComments(songId: Long, page: Int = 1): CommentPage
+    suspend fun commentReplies(songId: Long, parentCommentId: Long, cursor: Long? = null): CommentPage
+    suspend fun postComment(songId: Long, content: String, replyToCommentId: Long? = null): Boolean
+    suspend fun hugComment(songId: Long, commentId: Long, targetUserId: Long): Boolean
     suspend fun streamUrl(songId: Long, quality: String = "exhigh"): String?
     suspend fun createLoginQr(): LoginQr
     suspend fun checkLoginQr(key: String): LoginResult

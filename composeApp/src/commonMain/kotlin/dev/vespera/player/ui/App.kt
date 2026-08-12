@@ -9,12 +9,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -75,7 +77,7 @@ fun VesperaApp(
                 ) { padding ->
                     Box(Modifier.fillMaxSize().padding(padding)) {
                         if (nowPlaying) {
-                            NowPlayingScreen(api, player, onClose = { nowPlaying = false }, onPlay = playSong)
+                            NowPlayingScreen(api, player, onClose = { nowPlaying = false }, onPlay = playSong, onError = { error = it })
                         } else if (openedPlaylist != null) {
                             PlaylistDetailScreen(
                                 api = api,
@@ -478,16 +480,281 @@ private fun LibraryScreen(api: MusicApi, history: List<Song>, onPlay: (Song) -> 
 
 @Composable
 private fun CommentsScreen(api: MusicApi, song: Song?, onError: (String) -> Unit) {
-    var comments by remember { mutableStateOf(emptyList<Comment>()) }
-    var videos by remember { mutableStateOf(emptyList<Video>()) }
-    LaunchedEffect(song?.id) { if (song != null) runCatching { api.comments(song.id) }.onSuccess { comments = it }.onFailure { onError(it.message.orEmpty()) } }
-    CommentList(song, comments)
+    CommentBrowser(api, song, Modifier.fillMaxSize(), onError)
 }
 
 @Composable
-private fun CommentList(song: Song?, comments: List<Comment>, modifier: Modifier = Modifier) = LazyColumn(modifier, contentPadding = PaddingValues(20.dp)) {
-    item { Text("评论", style = MaterialTheme.typography.headlineMedium); Text(song?.name ?: "选择歌曲后查看评论", style = MaterialTheme.typography.bodyMedium); Spacer(Modifier.height(12.dp)) }
-    items(comments, key = Comment::id) { ListItem(headlineContent = { Text(it.user) }, supportingContent = { Text(it.content) }, trailingContent = { Text("${it.likedCount} 赞") }) }
+private fun CommentBrowser(api: MusicApi, song: Song?, modifier: Modifier = Modifier, onError: (String) -> Unit) {
+    if (song == null) {
+        EmptyFeature("暂无评论", "选择并播放歌曲后查看评论")
+        return
+    }
+    var sort by remember(song.id) { mutableStateOf(CommentSort.RECOMMENDED) }
+    var comments by remember(song.id) { mutableStateOf(emptyList<Comment>()) }
+    var hotComments by remember(song.id) { mutableStateOf(emptyList<Comment>()) }
+    var totalCount by remember(song.id) { mutableIntStateOf(0) }
+    var page by remember(song.id) { mutableIntStateOf(1) }
+    var cursor by remember(song.id) { mutableStateOf<Long?>(null) }
+    var hasMore by remember(song.id) { mutableStateOf(false) }
+    var loading by remember(song.id) { mutableStateOf(true) }
+    var loadingMore by remember(song.id) { mutableStateOf(false) }
+    var refreshKey by remember(song.id) { mutableIntStateOf(0) }
+    var draft by remember(song.id) { mutableStateOf("") }
+    var replyingTo by remember(song.id) { mutableStateOf<Comment?>(null) }
+    var sending by remember(song.id) { mutableStateOf(false) }
+    var expandedCommentId by remember(song.id) { mutableStateOf<Long?>(null) }
+    var floorReplies by remember(song.id) { mutableStateOf(emptyList<Comment>()) }
+    var floorCursor by remember(song.id) { mutableStateOf<Long?>(null) }
+    var floorHasMore by remember(song.id) { mutableStateOf(false) }
+    var floorLoading by remember(song.id) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    fun updateComment(id: Long, transform: (Comment) -> Comment) {
+        comments = comments.map { if (it.id == id) transform(it) else it }
+        hotComments = hotComments.map { if (it.id == id) transform(it) else it }
+    }
+
+    fun loadFloor(comment: Comment, append: Boolean) {
+        if (floorLoading) return
+        if (!append && expandedCommentId == comment.id) {
+            expandedCommentId = null
+            floorReplies = emptyList()
+            return
+        }
+        scope.launch {
+            floorLoading = true
+            if (!append) {
+                expandedCommentId = comment.id
+                floorReplies = emptyList()
+                floorCursor = null
+            }
+            try {
+                val result = api.commentReplies(song.id, comment.id, if (append) floorCursor else null)
+                floorReplies = if (append) (floorReplies + result.comments).distinctBy(Comment::id) else result.comments
+                floorCursor = result.nextCursor
+                floorHasMore = result.hasMore
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                onError(error.message ?: "回复加载失败")
+            } finally {
+                floorLoading = false
+            }
+        }
+    }
+
+    LaunchedEffect(song.id, sort, refreshKey) {
+        loading = true
+        page = 1
+        cursor = null
+        expandedCommentId = null
+        try {
+            hotComments = try {
+                api.hotComments(song.id).comments
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            val result = api.commentPage(song.id, sort = sort)
+            comments = result.comments
+            totalCount = result.totalCount
+            hasMore = result.hasMore
+            cursor = result.nextCursor
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            onError(error.message ?: "评论加载失败")
+        } finally {
+            loading = false
+        }
+    }
+
+    LazyColumn(modifier, contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("评论", style = MaterialTheme.typography.headlineMedium)
+                    Text(song.name, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text(if (totalCount > 0) "$totalCount 条" else "", style = MaterialTheme.typography.labelLarge)
+            }
+        }
+        item {
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                CommentSort.entries.forEachIndexed { index, option ->
+                    SegmentedButton(
+                        selected = sort == option,
+                        onClick = { sort = option },
+                        shape = SegmentedButtonDefaults.itemShape(index, CommentSort.entries.size),
+                    ) { Text(option.label) }
+                }
+            }
+        }
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (replyingTo != null) {
+                    AssistChip(
+                        onClick = { replyingTo = null },
+                        label = { Text("回复 @${replyingTo?.user}") },
+                        trailingIcon = { Icon(Icons.Default.Close, "取消回复", Modifier.size(16.dp)) },
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text(if (replyingTo == null) "写下评论" else "回复 @${replyingTo?.user}") },
+                        minLines = 1,
+                        maxLines = 4,
+                    )
+                    FilledIconButton(
+                        enabled = draft.isNotBlank() && !sending,
+                        onClick = {
+                            scope.launch {
+                                sending = true
+                                try {
+                                    api.postComment(song.id, draft, replyingTo?.id)
+                                    draft = ""
+                                    replyingTo = null
+                                    refreshKey++
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (error: Throwable) {
+                                    onError(error.message ?: "评论发送失败")
+                                } finally {
+                                    sending = false
+                                }
+                            }
+                        },
+                    ) { Icon(Icons.Default.Send, "发送") }
+                }
+            }
+        }
+        if (loading) {
+            item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+        }
+        if (hotComments.isNotEmpty()) {
+            item { Text("热门评论", style = MaterialTheme.typography.titleMedium) }
+            items(hotComments, key = { "hot-${it.id}" }) { comment ->
+                CommentItem(
+                    comment = comment,
+                    onLike = {
+                        scope.launch {
+                            runCatching { api.likeComment(song.id, comment.id, !comment.liked) }
+                                .onSuccess { updateComment(comment.id) { it.copy(liked = !it.liked, likedCount = (it.likedCount + if (it.liked) -1 else 1).coerceAtLeast(0)) } }
+                                .onFailure { onError(it.message ?: "点赞失败") }
+                        }
+                    },
+                    onHug = { scope.launch { runCatching { api.hugComment(song.id, comment.id, comment.userId) }.onSuccess { onError("抱一抱已送达") }.onFailure { onError(it.message ?: "抱一抱失败") } } },
+                    onReply = { replyingTo = comment },
+                    onExpand = { loadFloor(comment, false) },
+                    replies = if (expandedCommentId == comment.id) floorReplies else emptyList(),
+                    floorLoading = floorLoading && expandedCommentId == comment.id,
+                    floorHasMore = floorHasMore && expandedCommentId == comment.id,
+                    onLoadMoreReplies = { loadFloor(comment, true) },
+                )
+            }
+        }
+        item { Text(if (totalCount > 0) "全部评论 · $totalCount" else "全部评论", style = MaterialTheme.typography.titleMedium) }
+        items(comments, key = { "comment-${it.id}" }) { comment ->
+            CommentItem(
+                comment = comment,
+                onLike = {
+                    scope.launch {
+                        runCatching { api.likeComment(song.id, comment.id, !comment.liked) }
+                            .onSuccess { updateComment(comment.id) { it.copy(liked = !it.liked, likedCount = (it.likedCount + if (it.liked) -1 else 1).coerceAtLeast(0)) } }
+                            .onFailure { onError(it.message ?: "点赞失败") }
+                    }
+                },
+                onHug = { scope.launch { runCatching { api.hugComment(song.id, comment.id, comment.userId) }.onSuccess { onError("抱一抱已送达") }.onFailure { onError(it.message ?: "抱一抱失败") } } },
+                onReply = { replyingTo = comment },
+                onExpand = { loadFloor(comment, false) },
+                replies = if (expandedCommentId == comment.id) floorReplies else emptyList(),
+                floorLoading = floorLoading && expandedCommentId == comment.id,
+                floorHasMore = floorHasMore && expandedCommentId == comment.id,
+                onLoadMoreReplies = { loadFloor(comment, true) },
+            )
+        }
+        if (hasMore) {
+            item {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    if (loadingMore) CircularProgressIndicator(Modifier.size(28.dp))
+                    else OutlinedButton({
+                        val requestedPage = page + 1
+                        val requestedSort = sort
+                        scope.launch {
+                            loadingMore = true
+                            try {
+                                val result = api.commentPage(song.id, requestedPage, requestedSort, cursor)
+                                if (sort == requestedSort) {
+                                    comments = (comments + result.comments).distinctBy(Comment::id)
+                                    page = requestedPage
+                                    cursor = result.nextCursor
+                                    hasMore = result.hasMore
+                                }
+                            } catch (error: CancellationException) {
+                                throw error
+                            } catch (error: Throwable) {
+                                onError(error.message ?: "评论加载失败")
+                            } finally {
+                                loadingMore = false
+                            }
+                        }
+                    }) { Text("加载更多") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CommentItem(
+    comment: Comment,
+    onLike: () -> Unit,
+    onHug: () -> Unit,
+    onReply: () -> Unit,
+    onExpand: () -> Unit,
+    replies: List<Comment>,
+    floorLoading: Boolean,
+    floorHasMore: Boolean,
+    onLoadMoreReplies: () -> Unit,
+) {
+    Surface(shape = MaterialTheme.shapes.small, tonalElevation = 1.dp) {
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Top) {
+                if (comment.avatarUrl != null) AsyncImage(comment.avatarUrl, null, Modifier.size(44.dp).clip(CircleShape))
+                else Icon(Icons.Default.AccountCircle, null, Modifier.size(44.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text(comment.user, fontWeight = FontWeight.SemiBold)
+                    Text(comment.content)
+                    comment.replyContent?.let { reply ->
+                        Text("@${comment.replyUser.orEmpty()}：$reply", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Text(listOf(comment.timeLabel, comment.ipLocation).filter(String::isNotBlank).joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                if (comment.replyCount > 0) TextButton(onExpand) { Text(if (replies.isEmpty()) "${comment.replyCount} 条回复" else "收起回复") }
+                IconButton(onHug, enabled = comment.userId > 0) { Icon(Icons.Default.FavoriteBorder, "抱一抱") }
+                TextButton(onReply) { Icon(Icons.Default.Reply, null); Spacer(Modifier.width(4.dp)); Text("回复") }
+                TextButton(onLike) { Icon(if (comment.liked) Icons.Default.ThumbUp else Icons.Default.ThumbUpOffAlt, null); Spacer(Modifier.width(4.dp)); Text(comment.likedCount.toString()) }
+            }
+            if (floorLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+            replies.forEach { reply ->
+                HorizontalDivider()
+                Row(Modifier.padding(start = 24.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (reply.avatarUrl != null) AsyncImage(reply.avatarUrl, null, Modifier.size(32.dp).clip(CircleShape))
+                    Column(Modifier.weight(1f)) {
+                        Text(reply.user, style = MaterialTheme.typography.labelLarge)
+                        Text(reply.content, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+            if (floorHasMore) TextButton(onLoadMoreReplies, Modifier.align(Alignment.End)) { Text("更多回复") }
+        }
+    }
 }
 
 @Composable
@@ -626,12 +893,11 @@ private fun PlayerBar(player: PlayerController, onExpand: () -> Unit, onPlay: (S
 }
 
 @Composable
-private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: () -> Unit, onPlay: (Song) -> Unit) {
+private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: () -> Unit, onPlay: (Song) -> Unit, onError: (String) -> Unit) {
     val state by player.state.collectAsState()
     val song = state.current ?: return
     var tab by remember { mutableIntStateOf(0) }
     var lyric by remember { mutableStateOf(LyricBundle()) }
-    var comments by remember { mutableStateOf(emptyList<Comment>()) }
     var videos by remember { mutableStateOf(emptyList<Video>()) }
     var rate by remember { mutableFloatStateOf(1f) }
     var abStage by remember { mutableIntStateOf(0) }
@@ -639,7 +905,6 @@ private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: (
     val abState by abLoop.state.collectAsState()
     LaunchedEffect(song.id) {
         runCatching { lyric = api.lyrics(song.id) }
-        runCatching { comments = api.comments(song.id) }
         if (song.mvId > 0) runCatching { videos = api.videos(song.mvId) }
     }
     LaunchedEffect(state.playing, song.id) { while (state.playing) { delay(250); player.syncPosition() } }
@@ -650,7 +915,7 @@ private fun NowPlayingScreen(api: MusicApi, player: PlayerController, onClose: (
         when (tab) {
             0 -> LyricsView(lyric, state.positionMs, { player.seek(it) }, Modifier.fillMaxSize().padding(horizontal = 24.dp))
             1 -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp)) { items(state.queue, key = Song::id) { SongRow(it, onPlay) } }
-            2 -> CommentList(song, comments, Modifier.fillMaxSize())
+            2 -> CommentBrowser(api, song, Modifier.fillMaxSize(), onError)
             else -> VideoList(videos)
         }
         Column(Modifier.fillMaxWidth().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {

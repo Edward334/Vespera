@@ -7,7 +7,9 @@ import kotlinx.serialization.Serializable
 data class PlaylistDetail(val playlist: Playlist, val tracks: List<Song>)
 @Serializable data class Artist(val id: Long, val name: String, val coverUrl: String? = null, val aliases: List<String> = emptyList(), val albumCount: Int = 0, val songCount: Int = 0)
 @Serializable data class Album(val id: Long, val name: String, val artist: String = "", val coverUrl: String? = null, val songCount: Int = 0, val publishTime: Long = 0)
-@Serializable data class Comment(val id: Long, val user: String, val avatarUrl: String?, val content: String, val likedCount: Int, val timeLabel: String, val liked: Boolean = false, val replyContent: String? = null)
+@Serializable data class Comment(val id: Long, val user: String, val avatarUrl: String?, val content: String, val likedCount: Int, val timeLabel: String, val liked: Boolean = false, val replyContent: String? = null, val userId: Long = 0, val timeMs: Long = 0, val ipLocation: String = "", val replyUser: String? = null, val replyCount: Int = 0)
+enum class CommentSort(val code: Int, val label: String) { RECOMMENDED(99, "推荐"), HOT(2, "最热"), NEWEST(3, "最新") }
+data class CommentPage(val comments: List<Comment>, val totalCount: Int = 0, val hasMore: Boolean = false, val nextCursor: Long? = null)
 @Serializable data class Video(val id: String, val title: String, val url: String?, val durationMs: Long = 0, val coverUrl: String? = null, val creator: String = "")
 @Serializable data class Radio(val id: Long, val name: String, val description: String = "", val coverUrl: String? = null)
 enum class SearchType(val code: Int, val label: String) { SONG(1, "歌曲"), PLAYLIST(1000, "歌单"), ARTIST(100, "歌手"), ALBUM(10, "专辑"), VIDEO(1014, "视频"), RADIO(1009, "播客") }

@@ -2,6 +2,7 @@ package dev.vespera.player
 
 import dev.vespera.player.data.NeteaseMusicApi
 import dev.vespera.player.model.SearchType
+import dev.vespera.player.model.CommentSort
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -148,5 +149,69 @@ class NeteaseMusicApiTest {
         assertEquals("Description", detail.playlist.description)
         assertEquals(listOf(1L, 2L), detail.tracks.map { it.id })
         assertEquals(listOf("/api/v6/playlist/detail", "/api/v3/song/detail"), paths)
+    }
+
+    @Test
+    fun commentPageUsesSortCursorAndParsesReplyMetadata() = runTest {
+        val engine = MockEngine { request ->
+            assertEquals("/api/v2/resource/comments", request.url.encodedPath)
+            val body = request.body as FormDataContent
+            assertEquals("3", body.formData["sortType"])
+            assertEquals("123", body.formData["cursor"])
+            assertEquals("R_SO_4_7", body.formData["threadId"])
+            respond(
+                content = """{"code":200,"data":{"totalCount":9,"hasMore":true,"cursor":"456","comments":[{"commentId":10,"content":"Comment","likedCount":3,"liked":true,"time":100,"timeStr":"刚刚","ipLocation":{"location":"上海"},"user":{"userId":11,"nickname":"User","avatarUrl":"avatar"},"beReplied":[{"content":"Reply","user":{"nickname":"Other"}}]},{"commentId":12,"content":"No reply","likedCount":0,"time":99,"user":{"userId":13,"nickname":"Second"},"beReplied":null}]}}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+
+        val page = NeteaseMusicApi(HttpClient(engine), storedCookie = "").commentPage(7, 2, CommentSort.NEWEST, 123)
+
+        assertEquals(9, page.totalCount)
+        assertTrue(page.hasMore)
+        assertEquals(456L, page.nextCursor)
+        assertEquals(2, page.comments.size)
+        assertEquals(11L, page.comments.first().userId)
+        assertEquals("上海", page.comments.first().ipLocation)
+        assertEquals("Reply", page.comments.first().replyContent)
+        assertEquals("Other", page.comments.first().replyUser)
+        assertEquals(null, page.comments.last().replyContent)
+    }
+
+    @Test
+    fun commentMutationsUseNativeEndpoints() = runTest {
+        val paths = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            paths += request.url.encodedPath
+            val body = request.body as FormDataContent
+            assertEquals("R_SO_4_7", body.formData["threadId"])
+            when (request.url.encodedPath) {
+                "/api/resource/comments/add" -> assertEquals("New comment", body.formData["content"])
+                "/api/v1/resource/comments/reply" -> assertEquals("10", body.formData["commentId"])
+                "/api/v1/comment/like" -> assertEquals("10", body.formData["commentId"])
+                "/api/v2/resource/comments/hug/listener" -> assertEquals("11", body.formData["targetUserId"])
+            }
+            respond(
+                content = """{"code":200}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val api = NeteaseMusicApi(HttpClient(engine), storedCookie = "")
+
+        assertTrue(api.postComment(7, "New comment"))
+        assertTrue(api.postComment(7, "Reply", 10))
+        assertTrue(api.likeComment(7, 10, true))
+        assertTrue(api.hugComment(7, 10, 11))
+        assertEquals(
+            listOf(
+                "/api/resource/comments/add",
+                "/api/v1/resource/comments/reply",
+                "/api/v1/comment/like",
+                "/api/v2/resource/comments/hug/listener",
+            ),
+            paths,
+        )
     }
 }
