@@ -6,6 +6,9 @@ import kotlinx.coroutines.flow.StateFlow
 interface MusicApi {
     val session: StateFlow<AccountSession>
     suspend fun search(keyword: String, page: Int = 1): List<Song>
+    suspend fun searchCatalog(keyword: String, type: SearchType, page: Int = 1): SearchPage
+    suspend fun hotSearch(): List<String>
+    suspend fun searchSuggestions(keyword: String): List<String>
     suspend fun playlists(): List<Playlist>
     suspend fun playlistTracks(id: Long): List<Song>
     suspend fun lyrics(songId: Long): LyricBundle

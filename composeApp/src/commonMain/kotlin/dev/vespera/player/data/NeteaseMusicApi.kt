@@ -35,20 +35,43 @@ class NeteaseMusicApi(
         mapOf("s" to keyword, "type" to "1", "limit" to "30", "offset" to ((page - 1) * 30).toString(), "total" to "true"),
     ).obj("result").array("songs").map(::song)
 
+    override suspend fun searchCatalog(keyword: String, type: SearchType, page: Int): SearchPage {
+        val result = request(
+            "/api/cloudsearch/pc",
+            mapOf(
+                "s" to keyword,
+                "type" to type.code.toString(),
+                "limit" to "30",
+                "offset" to ((page - 1) * 30).toString(),
+                "total" to "true",
+            ),
+        ).obj("result")
+        return SearchPage(
+            type = type,
+            songs = if (type == SearchType.SONG) result.array("songs").map(::song) else emptyList(),
+            playlists = if (type == SearchType.PLAYLIST) result.array("playlists").map(::playlist) else emptyList(),
+            artists = if (type == SearchType.ARTIST) result.array("artists").map(::artist) else emptyList(),
+            albums = if (type == SearchType.ALBUM) result.array("albums").map(::album) else emptyList(),
+            videos = if (type == SearchType.VIDEO) result.array("videos").map(::video) else emptyList(),
+            radios = if (type == SearchType.RADIO) result.array("djRadios").map(::radio) else emptyList(),
+            hasMore = result.boolean("hasMore"),
+        )
+    }
+
+    override suspend fun hotSearch(): List<String> = request("/api/search/hot/detail", emptyMap())
+        .array("data").mapNotNull { it.jsonObject.optionalString("searchWord") }
+
+    override suspend fun searchSuggestions(keyword: String): List<String> = request(
+        "/api/search/suggest/web",
+        mapOf("s" to keyword),
+    ).objOrNull("result")?.array("allMatch").orEmpty().mapNotNull { it.jsonObject.optionalString("keyword") }
+
     override suspend fun playlists(): List<Playlist> {
         val uid = session.value.profile?.id ?: refreshAccount()?.id ?: error("请先登录网易云账号")
         return request("/api/user/playlist", mapOf("uid" to uid.toString(), "limit" to "1000", "offset" to "0", "includeVideo" to "true"))
             .array("playlist").map { value ->
                 val item = value.jsonObject
-                Playlist(
-                    id = item.long("id"),
-                    name = item.string("name"),
-                    trackCount = item.int("trackCount"),
-                    coverUrl = item.optionalString("coverImgUrl"),
-                    description = item.optionalString("description").orEmpty(),
-                    creator = item.objOrNull("creator")?.optionalString("nickname").orEmpty(),
-                    subscribed = item.boolean("subscribed"),
-                )
+                playlist(item)
             }
     }
 
@@ -178,7 +201,7 @@ class NeteaseMusicApi(
 
     override suspend fun videos(songId: Long): List<Video> {
         val item = request("/api/v1/mv/detail", mapOf("id" to songId.toString())).objOrNull("data") ?: return emptyList()
-        return listOf(Video(item.long("id"), item.string("name"), null, item.long("duration"), item.optionalString("cover")))
+        return listOf(Video(item.long("id").toString(), item.string("name"), null, item.long("duration"), item.optionalString("cover")))
     }
 
     override suspend fun likeComment(songId: Long, commentId: Long, like: Boolean): Boolean {
@@ -238,6 +261,65 @@ class NeteaseMusicApi(
             albumId = album?.get("id")?.jsonPrimitive?.longOrNull ?: 0,
             aliases = item.array("alia").mapNotNull { it.jsonPrimitive.contentOrNull },
             fee = item.int("fee"),
+        )
+    }
+
+    private fun playlist(value: JsonElement): Playlist = playlist(value.jsonObject)
+
+    private fun playlist(item: JsonObject): Playlist = Playlist(
+        id = item.long("id"),
+        name = item.string("name"),
+        trackCount = item.int("trackCount"),
+        coverUrl = item.optionalString("coverImgUrl"),
+        description = item.optionalString("description").orEmpty(),
+        creator = item.objOrNull("creator")?.optionalString("nickname").orEmpty(),
+        subscribed = item.boolean("subscribed"),
+    )
+
+    private fun artist(value: JsonElement): Artist {
+        val item = value.jsonObject
+        return Artist(
+            id = item.long("id"),
+            name = item.string("name"),
+            coverUrl = item.optionalString("picUrl") ?: item.optionalString("img1v1Url"),
+            aliases = (item["alias"] ?: item["alia"])?.jsonArray.orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull },
+            albumCount = item.int("albumSize"),
+            songCount = item.int("musicSize"),
+        )
+    }
+
+    private fun album(value: JsonElement): Album {
+        val item = value.jsonObject
+        return Album(
+            id = item.long("id"),
+            name = item.string("name"),
+            artist = item.objOrNull("artist")?.optionalString("name")
+                ?: item.array("artists").joinToString(" · ") { it.jsonObject.string("name") },
+            coverUrl = item.optionalString("picUrl"),
+            songCount = item.int("size"),
+            publishTime = item["publishTime"]?.jsonPrimitive?.longOrNull ?: 0,
+        )
+    }
+
+    private fun video(value: JsonElement): Video {
+        val item = value.jsonObject
+        return Video(
+            id = item.optionalString("vid") ?: item["id"]?.jsonPrimitive?.content.orEmpty(),
+            title = item.optionalString("title") ?: item.optionalString("name").orEmpty(),
+            url = null,
+            durationMs = item["durationms"]?.jsonPrimitive?.longOrNull ?: item["duration"]?.jsonPrimitive?.longOrNull ?: 0,
+            coverUrl = item.optionalString("coverUrl") ?: item.optionalString("cover"),
+            creator = item.array("creator").joinToString(" · ") { it.jsonObject.optionalString("userName").orEmpty() },
+        )
+    }
+
+    private fun radio(value: JsonElement): Radio {
+        val item = value.jsonObject
+        return Radio(
+            id = item.long("id"),
+            name = item.string("name"),
+            description = item.optionalString("rcmdtext") ?: item.optionalString("desc").orEmpty(),
+            coverUrl = item.optionalString("picUrl"),
         )
     }
 }

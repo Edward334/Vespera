@@ -26,6 +26,7 @@ import dev.vespera.player.download.DownloadManager
 import dev.vespera.player.data.HistoryRepository
 import dev.vespera.player.lyrics.*
 import dev.vespera.player.model.*
+import kotlinx.coroutines.CancellationException
 import dev.vespera.player.player.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -40,7 +41,6 @@ fun VesperaApp(
 ) {
     var destination by remember { mutableStateOf(AppDestination.HOME) }
     var nowPlaying by remember { mutableStateOf(false) }
-    var query by remember { mutableStateOf("") }
     var songs by remember { mutableStateOf(emptyList<Song>()) }
     val history = remember { HistoryRepository() }
     var error by remember { mutableStateOf<String?>(null) }
@@ -78,10 +78,7 @@ fun VesperaApp(
                             AppDestination.HOME -> HomeScreen(songs, playSong, downloadSong) {
                                 scope.launch { runCatching { api.dailySongs() }.onSuccess { songs = it }.onFailure { error = it.message } }
                             }
-                            AppDestination.SEARCH -> SearchScreen(query, songs, { value ->
-                                query = value
-                                scope.launch { runCatching { api.search(value) }.onSuccess { songs = it }.onFailure { error = it.message } }
-                            }, playSong, downloadSong)
+                            AppDestination.SEARCH -> SearchScreen(api, playSong, downloadSong, onError = { error = it })
                             AppDestination.LIBRARY -> LibraryScreen(api, history.songs.collectAsState().value, playSong, downloadSong, onError = { error = it })
                             AppDestination.COMMENTS -> CommentsScreen(api, player.state.collectAsState().value.current, onError = { error = it })
                             AppDestination.SETTINGS -> SettingsScreen(api, playbackFeatures)
@@ -136,13 +133,223 @@ private fun HomeScreen(songs: List<Song>, onPlay: (Song) -> Unit, onDownload: (S
 }
 
 @Composable
-private fun SearchScreen(query: String, songs: List<Song>, onQuery: (String) -> Unit, onPlay: (Song) -> Unit, onDownload: (Song) -> Unit) {
-    Column(Modifier.fillMaxSize().padding(20.dp)) {
-        OutlinedTextField(query, onQuery, Modifier.fillMaxWidth(), singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) }, placeholder = { Text("搜索歌曲、歌手和歌单") })
-        Spacer(Modifier.height(16.dp))
-        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) { items(songs, key = Song::id) { SongRow(it, onPlay, onDownload) } }
+private fun SearchScreen(
+    api: MusicApi,
+    onPlay: (Song) -> Unit,
+    onDownload: (Song) -> Unit,
+    onError: (String) -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    var selectedType by remember { mutableStateOf(SearchType.SONG) }
+    var result by remember { mutableStateOf<SearchPage?>(null) }
+    var hotSearches by remember { mutableStateOf(emptyList<String>()) }
+    var suggestions by remember { mutableStateOf(emptyList<String>()) }
+    var page by remember { mutableIntStateOf(1) }
+    var loading by remember { mutableStateOf(false) }
+    var loadingMore by remember { mutableStateOf(false) }
+    val history = remember { mutableStateListOf<String>() }
+    val scope = rememberCoroutineScope()
+
+    fun selectKeyword(keyword: String) {
+        query = keyword
+        history.remove(keyword)
+        history.add(0, keyword)
+        while (history.size > 10) history.removeAt(history.lastIndex)
+    }
+
+    LaunchedEffect(api) {
+        runCatching { api.hotSearch() }
+            .onSuccess { hotSearches = it.take(12) }
+    }
+    LaunchedEffect(query) {
+        if (query.isBlank()) {
+            suggestions = emptyList()
+            return@LaunchedEffect
+        }
+        delay(250)
+        suggestions = try {
+            api.searchSuggestions(query.trim()).take(8)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+    LaunchedEffect(query, selectedType) {
+        if (query.isBlank()) {
+            result = null
+            return@LaunchedEffect
+        }
+        delay(450)
+        val keyword = query.trim()
+        loading = true
+        page = 1
+        try {
+            result = api.searchCatalog(keyword, selectedType)
+            history.remove(keyword)
+            history.add(0, keyword)
+            while (history.size > 10) history.removeAt(history.lastIndex)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            onError(error.message ?: "搜索失败")
+        } finally {
+            loading = false
+        }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+            singleLine = true,
+            leadingIcon = { Icon(Icons.Default.Search, null) },
+            trailingIcon = {
+                if (query.isNotEmpty()) IconButton({ query = "" }) { Icon(Icons.Default.Close, "清空搜索") }
+            },
+            placeholder = { Text("搜索音乐、歌手、专辑、视频或播客") },
+        )
+        if (query.isBlank()) {
+            SearchLanding(history, hotSearches, ::selectKeyword)
+            return@Column
+        }
+        if (suggestions.isNotEmpty()) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                suggestions.take(4).forEach { suggestion ->
+                    SuggestionChip(
+                        onClick = { selectKeyword(suggestion) },
+                        label = { Text(suggestion, maxLines = 1) },
+                        icon = { Icon(Icons.Default.NorthWest, null, Modifier.size(16.dp)) },
+                    )
+                }
+            }
+        }
+        ScrollableTabRow(
+            selectedTabIndex = SearchType.entries.indexOf(selectedType),
+            edgePadding = 12.dp,
+        ) {
+            SearchType.entries.forEach { type ->
+                Tab(
+                    selected = selectedType == type,
+                    onClick = { selectedType = type },
+                    text = { Text(type.label) },
+                )
+            }
+        }
+        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        SearchResults(
+            result = result,
+            onPlay = onPlay,
+            onDownload = onDownload,
+            loadingMore = loadingMore,
+            onLoadMore = {
+                val keyword = query.trim()
+                val type = selectedType
+                val nextPage = page + 1
+                scope.launch {
+                    loadingMore = true
+                    try {
+                        val next = api.searchCatalog(keyword, type, nextPage)
+                        if (query.trim() == keyword && selectedType == type) {
+                            result = result?.append(next) ?: next
+                            page = nextPage
+                        }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        onError(error.message ?: "加载更多失败")
+                    } finally {
+                        loadingMore = false
+                    }
+                }
+            },
+        )
     }
 }
+
+@Composable
+private fun SearchLanding(history: List<String>, hotSearches: List<String>, onSelect: (String) -> Unit) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        if (history.isNotEmpty()) {
+            item { Text("搜索历史", style = MaterialTheme.typography.titleMedium) }
+            item {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    history.forEach { keyword -> AssistChip({ onSelect(keyword) }, { Text(keyword) }, leadingIcon = { Icon(Icons.Default.History, null, Modifier.size(16.dp)) }) }
+                }
+            }
+        }
+        item { Text("热搜", style = MaterialTheme.typography.titleMedium) }
+        if (hotSearches.isEmpty()) {
+            item { Text("暂无热搜内容", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        } else {
+            items(hotSearches) { keyword ->
+                ListItem(
+                    modifier = Modifier.clickable { onSelect(keyword) },
+                    headlineContent = { Text(keyword) },
+                    leadingContent = { Icon(Icons.Default.TrendingUp, null) },
+                    trailingContent = { Icon(Icons.Default.ChevronRight, null) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchResults(
+    result: SearchPage?,
+    onPlay: (Song) -> Unit,
+    onDownload: (Song) -> Unit,
+    loadingMore: Boolean,
+    onLoadMore: () -> Unit,
+) {
+    if (result == null) {
+        if (!loadingMore) EmptyFeature("正在搜索", "输入关键词后将显示分类结果")
+        return
+    }
+    val isEmpty = result.songs.isEmpty() && result.playlists.isEmpty() && result.artists.isEmpty() &&
+        result.albums.isEmpty() && result.videos.isEmpty() && result.radios.isEmpty()
+    if (isEmpty) {
+        EmptyFeature("没有找到结果", "换一个关键词试试")
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        items(result.songs, key = Song::id) { SongRow(it, onPlay, onDownload) }
+        items(result.playlists, key = Playlist::id) { item -> CatalogRow(item.name, "${item.creator} · ${item.trackCount} 首", item.coverUrl, Icons.Default.QueueMusic) }
+        items(result.artists, key = Artist::id) { item -> CatalogRow(item.name, "${item.albumCount} 张专辑 · ${item.songCount} 首歌曲", item.coverUrl, Icons.Default.Person) }
+        items(result.albums, key = Album::id) { item -> CatalogRow(item.name, "${item.artist} · ${item.songCount} 首", item.coverUrl, Icons.Default.Album) }
+        items(result.videos, key = Video::id) { item -> CatalogRow(item.title, item.creator.ifBlank { "视频" }, item.coverUrl, Icons.Default.VideoLibrary) }
+        items(result.radios, key = Radio::id) { item -> CatalogRow(item.name, item.description, item.coverUrl, Icons.Default.Podcasts) }
+        if (result.hasMore) {
+            item {
+                Box(Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
+                    if (loadingMore) CircularProgressIndicator(Modifier.size(28.dp))
+                    else OutlinedButton(onLoadMore) { Text("继续加载") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CatalogRow(title: String, supporting: String, coverUrl: String?, icon: androidx.compose.ui.graphics.vector.ImageVector) = ListItem(
+    headlineContent = { Text(title, maxLines = 1) },
+    supportingContent = { Text(supporting, maxLines = 2) },
+    leadingContent = { if (coverUrl != null) AsyncImage(coverUrl, null, Modifier.size(48.dp)) else Icon(icon, null) },
+)
+
+private fun SearchPage.append(next: SearchPage) = copy(
+    songs = songs + next.songs,
+    playlists = playlists + next.playlists,
+    artists = artists + next.artists,
+    albums = albums + next.albums,
+    videos = videos + next.videos,
+    radios = radios + next.radios,
+    hasMore = next.hasMore,
+)
 
 @Composable
 private fun LibraryScreen(api: MusicApi, history: List<Song>, onPlay: (Song) -> Unit, onDownload: (Song) -> Unit, onError: (String) -> Unit) {
