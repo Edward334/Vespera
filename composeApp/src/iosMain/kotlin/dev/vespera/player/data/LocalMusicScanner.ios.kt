@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+
 package dev.vespera.player.data
 
 import dev.vespera.player.model.Song
