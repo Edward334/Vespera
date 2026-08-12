@@ -2,7 +2,7 @@
 
 package dev.vespera.player.player
 
-import platform.AVFoundation.AVPlayer
+import platform.AVFoundation.*
 import platform.CoreMedia.CMTimeMakeWithSeconds
 import platform.CoreMedia.CMTimeGetSeconds
 import platform.Foundation.NSURL
